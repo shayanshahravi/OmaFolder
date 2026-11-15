@@ -5,6 +5,8 @@ All notable changes to OmaFolder are documented here. This project follows
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-15
+
 ### Fixed
 
 - Folded icons are centred in the collapsed 32 px strip, and a list row's label
@@ -12,11 +14,6 @@ All notable changes to OmaFolder are documented here. This project follows
 - Opening a folded widget's panel no longer throws the widget out of the folder:
   the row is lent to the bar only while its panel is up (`expose`/`conceal`) and
   comes back to the folder as soon as the panel closes.
-
-## [1.1.0] - 2026-11-15
-
-### Fixed
-
 - Left click on a folded row now opens that widget's panel. A folded widget has
   no live bar instance, so the drawer ejects it back onto the bar first and then
   summons the panel on the real instance instead of failing with "unknown" and a
