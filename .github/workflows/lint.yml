@@ -1,0 +1,145 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  shell:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y shellcheck
+
+      - name: Lint every shell script
+        run: |
+          status=0
+          for script in $(git ls-files '*.sh'); do
+            echo "== $script"
+            shellcheck --severity=warning --shell=bash "$script" || status=1
+          done
+          exit $status
+
+      - name: Syntax check
+        run: |
+          for script in $(git ls-files '*.sh'); do
+            bash -n "$script"
+          done
+
+  engine:
+    name: State engine
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Compile
+        run: python3 -m py_compile bin/omafolder-state
+
+      - name: Exercising the engine against a throwaway config
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          cat > "$work/shell.json" <<'JSON'
+          {
+            "bar": {
+              "position": "top",
+              "layout": {
+                "left": [{ "id": "omarchy.menu" }],
+                "center": [{ "id": "omarchy.clock" }],
+                "right": [{ "id": "omarchy.tray" }, { "id": "omarchy.audio" }]
+              }
+            }
+          }
+          JSON
+          export OMAFOLDER_STATE="$work/state.json"
+          export OMAFOLDER_SHELL="$work/shell.json"
+          engine=bin/omafolder-state
+
+          "$engine" init > /dev/null
+          "$engine" fold omarchy.audio | grep -q '"folded": true'
+          "$engine" fold omarchy.audio | grep -q '"already folded"'
+          "$engine" toggle omarchy.audio | grep -q '"active": false'
+          "$engine" eject omarchy.audio | grep -q '"ejected": true'
+
+          python3 - "$work/shell.json" <<'PY'
+          import json, sys
+          layout = json.load(open(sys.argv[1]))["bar"]["layout"]
+          assert [e["id"] for e in layout["right"]] == ["omarchy.tray", "omarchy.audio"], layout
+          print("layout restored:", layout["right"])
+          PY
+
+          if "$engine" eject does.not.exist > /dev/null; then
+            echo "expected a non-zero exit for an unknown id" >&2
+            exit 1
+          fi
+
+  manifest:
+    name: Manifest and QML syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Validate the manifest contract
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+
+          required = ["schemaVersion", "id", "name", "version", "kinds", "entryPoints"]
+          manifest = json.load(open("manifest.json"))
+          missing = [key for key in required if key not in manifest]
+          assert not missing, f"missing keys: {missing}"
+          assert manifest["schemaVersion"] == 1
+          assert isinstance(manifest["kinds"], list) and manifest["kinds"], "kinds must be non-empty"
+          assert not manifest["id"].startswith("omarchy."), "third-party ids cannot use omarchy.*"
+          for kind in manifest["kinds"]:
+              key = {"bar-widget": "barWidget", "panel": "panel", "overlay": "overlay",
+                     "menu": "menu", "service": "service", "bar": "bar"}[kind]
+              assert key in manifest["entryPoints"], f"{kind} needs entryPoints.{key}"
+          for kind, path in manifest["entryPoints"].items():
+              assert os.path.isfile(path), f"missing entry point file: {path}"
+              assert ".." not in path and not path.startswith("/"), f"unsafe path: {path}"
+          print("manifest ok:", manifest["id"], manifest["kinds"])
+          PY
+
+      - name: Reject symlinks in the plugin folder
+        run: |
+          if find . -path ./.git -prune -o -type l -print | grep -q .; then
+            echo "plugin folders cannot contain symlinks" >&2
+            find . -path ./.git -prune -o -type l -print >&2
+            exit 1
+          fi
+
+      - name: Install the QML toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends qt6-declarative-dev-tools qml6-module-qtquick
+
+      - name: qmllint the QML entry points
+        run: |
+          status=0
+          for file in BarWidget.qml Drawer.qml DrawerItem.qml; do
+            echo "== $file"
+            # Imports of the Omarchy shell (qs.Ui, qs.Commons) only resolve
+            # inside a running Omarchy install, so unresolved-type warnings are
+            # expected here; syntax errors are not.
+            qmllint "$file" 2>&1 | tee "/tmp/$file.lint" || true
+            if grep -qiE "expected token|syntax error" "/tmp/$file.lint"; then
+              status=1
+            fi
+          done
+          exit $status

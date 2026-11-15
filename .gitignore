@@ -1,0 +1,9 @@
+# Reasonable ignores for a Quickshell plugin repository.
+*.bak
+*.bak.*
+*.log
+__pycache__/
+*.pyc
+.DS_Store
+.idea/
+.vscode/
