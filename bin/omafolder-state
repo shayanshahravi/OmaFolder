@@ -1,0 +1,857 @@
+#!/usr/bin/env python3
+"""OmaFolder state engine.
+
+The single source of truth for which Omarchy bar widgets are folded into the
+OmaFolder drawer. Folding a widget removes its entry from the bar layout in
+``~/.config/omarchy/shell.json``; ejecting puts it back where it came from.
+Nothing else in the shell config is touched.
+
+Every command prints exactly one JSON object on stdout and exits non-zero with
+``{"ok": false, "error": "..."}`` on failure, so the QML side can read the
+result without parsing prose.
+
+Commands:
+  init                          create state.json when missing
+  summary                       state items merged with discovered plugin metadata
+  bar-modules                   widgets currently on the bar, grouped by section
+  fold <id>                     move a bar widget into the drawer
+  eject <id>                    move a drawer item back onto the bar
+  toggle <id>                   flip an item's active state
+  reorder <id> <index>          move an item to a new position in the drawer
+  active <id> <true|false>      set an item's active state explicitly
+  update-check <id>             compare an installed plugin with the marketplace
+  update <id>                   pull the checked-out plugin to its latest commit
+  rescan                        ask the shell to pick up newly installed plugin code
+
+Only ``update-check`` and ``update`` touch the network, and only for the one
+plugin named on the command line.
+"""
+
+from __future__ import annotations
+
+import gzip
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+
+PLUGIN_ID = "io.github.shayanshahravi.omafolder"
+SECTIONS = ("left", "center", "right")
+
+HOME = os.path.expanduser("~")
+CONFIG_DIR = os.path.join(HOME, ".config", "omafolder")
+STATE_PATH = os.environ.get("OMAFOLDER_STATE") or os.path.join(CONFIG_DIR, "state.json")
+SHELL_PATH = os.environ.get("OMAFOLDER_SHELL") or os.path.join(
+    HOME, ".config", "omarchy", "shell.json"
+)
+BACKUP_DIR = os.path.join(HOME, ".local", "state", "omafolder", "backups")
+# Test runs point the engine at throwaway files; never poke the live shell then.
+LIVE = not (os.environ.get("OMAFOLDER_STATE") or os.environ.get("OMAFOLDER_SHELL"))
+
+# The community marketplace omarchy.org links to for third-party plugins. The
+# registry indexes every listed repository, which is how a plugin id is turned
+# back into the repository whose upstream commits we compare against.
+MARKET_URL = (
+    "https://raw.githubusercontent.com/omacom/omarchy-plugin-marketplace/main/registry.json"
+)
+CACHE_DIR = os.path.join(HOME, ".cache", "omafolder")
+MARKET_CACHE = os.environ.get("OMAFOLDER_MARKET_CACHE") or os.path.join(
+    CACHE_DIR, "market-registry.json"
+)
+# A day-old registry is good enough to answer "is a newer version out?".
+MARKET_TTL = 24 * 3600
+OFFLINE = bool(os.environ.get("OMAFOLDER_OFFLINE"))
+
+
+def out(payload):
+    payload.setdefault("ok", True)
+    sys.stdout.write(json.dumps(payload) + "\n")
+    return 0
+
+
+def die(message):
+    sys.stdout.write(json.dumps({"ok": False, "error": message}) + "\n")
+    return 1
+
+
+def atomic_write(path, data):
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    handle, temp = tempfile.mkstemp(dir=directory, prefix=".omafolder-", suffix=".json")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(data, stream, indent=2)
+            stream.write("\n")
+        os.replace(temp, path)
+    except BaseException:
+        if os.path.exists(temp):
+            os.unlink(temp)
+        raise
+
+
+def backup(path):
+    if not os.path.exists(path):
+        return ""
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    destination = os.path.join(BACKUP_DIR, "%s-%s.bak" % (os.path.basename(path), stamp))
+    shutil.copy2(path, destination)
+    return destination
+
+
+def read_json(path, fallback=None):
+    try:
+        with open(path, "r", encoding="utf-8") as stream:
+            return json.load(stream)
+    except FileNotFoundError:
+        return fallback
+    except (OSError, ValueError) as error:
+        raise SystemExit(die("cannot read %s: %s" % (path, error)))
+
+
+def load_state():
+    state = read_json(STATE_PATH, None)
+    if not isinstance(state, dict):
+        state = {"version": 1, "pluginId": PLUGIN_ID, "items": []}
+    if state.get("version") != 1:
+        state = {"version": 1, "pluginId": PLUGIN_ID, "items": []}
+    items = state.get("items")
+    if not isinstance(items, list):
+        items = []
+    cleaned = []
+    for entry in items:
+        if not isinstance(entry, dict):
+            continue
+        plugin_id = str(entry.get("id") or "").strip()
+        if plugin_id == "" or plugin_id == PLUGIN_ID:
+            continue
+        cleaned.append(
+            {
+                "id": plugin_id,
+                "active": bool(entry.get("active", True)),
+                "section": entry.get("section") if entry.get("section") in SECTIONS else "right",
+                "index": int(entry.get("index") or 0),
+            }
+        )
+    state["items"] = cleaned
+    state.setdefault("version", 1)
+    state["pluginId"] = PLUGIN_ID
+    return state
+
+
+def save_state(state):
+    atomic_write(STATE_PATH, state)
+
+
+def load_shell(required=True):
+    shell = read_json(SHELL_PATH, None)
+    if not isinstance(shell, dict):
+        if required:
+            raise SystemExit(die("no bar layout at %s" % SHELL_PATH))
+        return None
+    return shell
+
+
+def layout_of(shell):
+    bar = shell.get("bar")
+    if not isinstance(bar, dict):
+        bar = {}
+        shell["bar"] = bar
+    layout = bar.get("layout")
+    if not isinstance(layout, dict):
+        layout = {}
+        bar["layout"] = layout
+    for section in SECTIONS:
+        if not isinstance(layout.get(section), list):
+            layout[section] = []
+    return layout
+
+
+def entry_id(entry):
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        return str(entry.get("id") or "")
+    return ""
+
+
+def find_entry(layout, plugin_id):
+    for section in SECTIONS:
+        for index, entry in enumerate(layout[section]):
+            if entry_id(entry) == plugin_id:
+                return section, index
+    return None, None
+
+
+def remove_entry(layout, plugin_id):
+    removed = None
+    for section in SECTIONS:
+        entries = layout[section]
+        kept = []
+        for index, entry in enumerate(entries):
+            if entry_id(entry) == plugin_id and removed is None:
+                removed = {"section": section, "index": index, "entry": entry}
+                continue
+            kept.append(entry)
+        layout[section] = kept
+    return removed
+
+
+def insert_entry(layout, plugin_id, section, index):
+    if section not in SECTIONS:
+        section = "right"
+    entries = layout[section]
+    position = max(0, min(int(index or 0), len(entries)))
+    entries.insert(position, {"id": plugin_id})
+    return section, position
+
+
+def reload_shell():
+    if not LIVE:
+        return False
+    try:
+        subprocess.run(
+            ["omarchy-shell", "-q", "shell", "reloadConfig"],
+            timeout=5,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
+
+
+def plugin_index():
+    """Map plugin id -> {name, kinds, barWidgetPath} from the plugin catalog."""
+    try:
+        result = subprocess.run(
+            ["omarchy-plugin-catalog"],
+            capture_output=True,
+            text=True,
+            timeout=12,
+            check=False,
+        )
+        rows = json.loads(result.stdout or "[]")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {}
+    if not isinstance(rows, list):
+        return {}
+    index = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        plugin_id = str(row.get("id") or "")
+        if plugin_id == "":
+            continue
+        kinds = row.get("kinds")
+        index[plugin_id] = {
+            "name": str(row.get("name") or plugin_id),
+            "kinds": kinds if isinstance(kinds, list) else [],
+            "barWidgetPath": str(row.get("barWidgetPath") or ""),
+        }
+    return index
+
+
+# Kinds whose panels are owned by the shell's panel loader rather than by the
+# bar widget itself.
+LOADER_KINDS = ("panel", "overlay", "menu")
+# A bar widget draws its own panel when its entry point opens one of these.
+PANEL_MARKERS = (
+    "PopupCard",
+    "KeyboardPanel",
+    "PopupWindow",
+    "Dropdown",
+    "function open(",
+)
+
+
+def has_panel(meta):
+    """Whether clicking the widget can open a panel of its own.
+
+    The shell decides this at runtime; here we only need a static answer so the
+    "Open panel" menu entry can be greyed out instead of failing with a freeze.
+    A plugin we cannot inspect is left enabled -- a notice beats hiding a
+    working action.
+    """
+    kinds = meta.get("kinds") or []
+    if any(kind in LOADER_KINDS for kind in kinds):
+        return True
+    path = meta.get("barWidgetPath") or ""
+    if path == "":
+        return True
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as stream:
+            source = stream.read()
+    except OSError:
+        return True
+    return any(marker in source for marker in PANEL_MARKERS)
+
+
+def describe(kinds):
+    labels = []
+    for kind in kinds or []:
+        label = {
+            "bar-widget": "Bar widget",
+            "panel": "Panel",
+            "overlay": "Overlay",
+            "menu": "Menu",
+            "service": "Service",
+            "bar": "Bar",
+        }.get(str(kind), str(kind))
+        if label not in labels:
+            labels.append(label)
+    return " · ".join(labels)
+
+
+def enrich(state):
+    index = plugin_index()
+    items = []
+    for position, entry in enumerate(state["items"]):
+        meta = index.get(entry["id"], {})
+        kinds = meta.get("kinds", [])
+        items.append(
+            {
+                "id": entry["id"],
+                "active": bool(entry.get("active", True)),
+                "section": entry["section"],
+                "index": entry["index"],
+                "position": position,
+                "name": meta.get("name") or entry["id"],
+                "kinds": kinds,
+                "kindLabel": describe(kinds) or "Bar widget",
+                "summonable": any(
+                    kind in ("bar-widget", "panel", "menu", "overlay", "bar") for kind in kinds
+                ),
+                "panel": has_panel(meta),
+            }
+        )
+    return items
+
+
+# --------------------------------------------------------------------- commands
+
+
+def command_init(_args):
+    state = load_state()
+    save_state(state)
+    return out({"statePath": STATE_PATH, "items": len(state["items"])})
+
+
+def command_summary(_args):
+    state = load_state()
+    items = enrich(state)
+    return out(
+        {
+            "items": items,
+            "count": len(items),
+            "activeCount": sum(1 for item in items if item["active"]),
+            "statePath": STATE_PATH,
+            "shellPath": SHELL_PATH,
+        }
+    )
+
+
+def command_bar_modules(_args):
+    shell = load_shell()
+    layout = layout_of(shell)
+    state = load_state()
+    folded = {entry["id"] for entry in state["items"]}
+    index = plugin_index()
+    modules = []
+    for section in SECTIONS:
+        for position, entry in enumerate(layout[section]):
+            plugin_id = entry_id(entry)
+            if plugin_id == "" or plugin_id == PLUGIN_ID or plugin_id in folded:
+                continue
+            meta = index.get(plugin_id, {})
+            modules.append(
+                {
+                    "id": plugin_id,
+                    "name": meta.get("name") or plugin_id,
+                    "section": section,
+                    "index": position,
+                    "panel": has_panel(meta),
+                }
+            )
+    return out({"modules": modules})
+
+
+def command_fold(args):
+    plugin_id = required_id(args)
+    if plugin_id == PLUGIN_ID:
+        return die("OmaFolder cannot fold itself")
+    state = load_state()
+    if any(entry["id"] == plugin_id for entry in state["items"]):
+        return out({"folded": False, "reason": "already folded", "count": len(state["items"])})
+
+    shell = load_shell()
+    layout = layout_of(shell)
+    removed = remove_entry(layout, plugin_id)
+    if removed is None:
+        return die("%s is not on the bar" % plugin_id)
+
+    state["items"].append(
+        {
+            "id": plugin_id,
+            "active": True,
+            "section": removed["section"],
+            "index": removed["index"],
+        }
+    )
+    save_state(state)
+    backup(SHELL_PATH)
+    atomic_write(SHELL_PATH, shell)
+    reloaded = reload_shell()
+    return out(
+        {
+            "folded": True,
+            "id": plugin_id,
+            "section": removed["section"],
+            "index": removed["index"],
+            "count": len(state["items"]),
+            "reloaded": reloaded,
+        }
+    )
+
+
+def command_eject(args):
+    plugin_id = required_id(args)
+    state = load_state()
+    item = None
+    remaining = []
+    for entry in state["items"]:
+        if entry["id"] == plugin_id and item is None:
+            item = entry
+        else:
+            remaining.append(entry)
+    if item is None:
+        return die("%s is not folded" % plugin_id)
+
+    shell = load_shell()
+    layout = layout_of(shell)
+    remove_entry(layout, plugin_id)
+    section, position = insert_entry(layout, plugin_id, item.get("section"), item.get("index"))
+
+    state["items"] = remaining
+    save_state(state)
+    backup(SHELL_PATH)
+    atomic_write(SHELL_PATH, shell)
+    reloaded = reload_shell()
+    return out(
+        {
+            "ejected": True,
+            "id": plugin_id,
+            "section": section,
+            "index": position,
+            "count": len(state["items"]),
+            "reloaded": reloaded,
+        }
+    )
+
+
+def command_toggle(args):
+    plugin_id = required_id(args)
+    state = load_state()
+    for entry in state["items"]:
+        if entry["id"] == plugin_id:
+            entry["active"] = not bool(entry.get("active", True))
+            save_state(state)
+            return out({"id": plugin_id, "active": entry["active"], "count": len(state["items"])})
+    return die("%s is not folded" % plugin_id)
+
+
+def command_active(args):
+    plugin_id = required_id(args)
+    if len(args) < 2:
+        return die("usage: active <id> <true|false>")
+    wanted = str(args[1]).strip().lower() in ("1", "true", "yes", "on")
+    state = load_state()
+    for entry in state["items"]:
+        if entry["id"] == plugin_id:
+            entry["active"] = wanted
+            save_state(state)
+            return out({"id": plugin_id, "active": wanted, "count": len(state["items"])})
+    return die("%s is not folded" % plugin_id)
+
+
+def command_reorder(args):
+    plugin_id = required_id(args)
+    if len(args) < 2:
+        return die("usage: reorder <id> <index>")
+    try:
+        wanted = int(args[1])
+    except (TypeError, ValueError):
+        return die("index must be a number")
+    state = load_state()
+    items = state["items"]
+    source = None
+    for position, entry in enumerate(items):
+        if entry["id"] == plugin_id:
+            source = position
+            break
+    if source is None:
+        return die("%s is not folded" % plugin_id)
+    target = max(0, min(wanted, len(items) - 1))
+    if target != source:
+        items.insert(target, items.pop(source))
+        save_state(state)
+    return out({"id": plugin_id, "position": target, "count": len(items)})
+
+
+def command_eject_all(_args):
+    state = load_state()
+    folded = [entry["id"] for entry in state["items"]]
+    if not folded:
+        return out({"ejected": 0, "count": 0})
+    shell = load_shell()
+    layout = layout_of(shell)
+    restored = []
+    for entry in state["items"]:
+        remove_entry(layout, entry["id"])
+        section, position = insert_entry(layout, entry["id"], entry.get("section"), entry.get("index"))
+        restored.append({"id": entry["id"], "section": section, "index": position})
+    state["items"] = []
+    save_state(state)
+    backup(SHELL_PATH)
+    atomic_write(SHELL_PATH, shell)
+    reloaded = reload_shell()
+    return out({"ejected": len(restored), "restored": restored, "reloaded": reloaded})
+
+
+def required_id(args):
+    if not args or str(args[0]).strip() == "":
+        raise SystemExit(die("usage: %s <plugin-id>" % (sys.argv[1] if len(sys.argv) > 1 else "")))
+    return str(args[0]).strip()
+
+
+# ------------------------------------------------------------------ marketplace
+
+
+def plugin_directory(plugin_id):
+    return os.path.join(HOME, ".config", "omarchy", "plugins", plugin_id)
+
+
+def atomic_write_text(path, text):
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    handle, temp = tempfile.mkstemp(dir=directory, prefix=".omafolder-", suffix=".json")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(text)
+        os.replace(temp, path)
+    except BaseException:
+        if os.path.exists(temp):
+            os.unlink(temp)
+        raise
+
+
+def fetch_market():
+    """Download the marketplace registry, or None when the network says no."""
+    request = urllib.request.Request(
+        MARKET_URL,
+        headers={"User-Agent": "OmaFolder", "Accept-Encoding": "gzip"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read()
+            if str(response.headers.get("Content-Encoding") or "").lower() == "gzip":
+                raw = gzip.decompress(raw)
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, ValueError, urllib.error.URLError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def read_cache(path):
+    try:
+        with open(path, "r", encoding="utf-8") as stream:
+            payload = json.load(stream)
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def market_registry():
+    """The marketplace index, cached for a day. None when unavailable."""
+    if OFFLINE:
+        return None
+    cached = read_cache(MARKET_CACHE)
+    fresh = False
+    if isinstance(cached, dict):
+        try:
+            fresh = (time.time() - os.path.getmtime(MARKET_CACHE)) < MARKET_TTL
+        except OSError:
+            fresh = False
+    if fresh:
+        return cached
+    fetched = fetch_market()
+    if fetched is None:
+        return cached if isinstance(cached, dict) else None
+    try:
+        atomic_write_text(MARKET_CACHE, json.dumps(fetched, separators=(",", ":")))
+    except OSError:
+        pass
+    return fetched
+
+
+def market_entry(registry, plugin_id):
+    """Marketplace record for one plugin id: its repository and listed commit."""
+    if not isinstance(registry, dict):
+        return None
+    for source in registry.get("sources") or []:
+        if not isinstance(source, dict):
+            continue
+        plugins = source.get("plugins")
+        if not isinstance(plugins, dict) or plugin_id not in plugins:
+            continue
+        return {
+            "repo": str(source.get("repo") or ""),
+            "branch": str(source.get("listingValidatedBranch") or ""),
+            "commit": str(source.get("listingValidatedCommit") or ""),
+        }
+    return None
+
+
+def git(directory, args, timeout=15):
+    """stdout of a git command, or None when it failed."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", directory] + list(args),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def remote_head(repo, branch=""):
+    """Commit the remote branch points at right now, without fetching it."""
+    if repo == "":
+        return ""
+    ref = "refs/heads/%s" % branch if branch else "HEAD"
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", repo, ref],
+            capture_output=True,
+            text=True,
+            timeout=25,
+            check=False,
+            env=dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="true"),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if result.returncode != 0:
+        return ""
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            return parts[0]
+    return ""
+
+
+def manifest_version_at(repo, commit, directory):
+    """Version string from manifest.json at `commit`, or '' when unknown."""
+    if commit == "":
+        return ""
+    github = re.match(
+        r"^(?:https?://|git@)github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?$", repo
+    )
+    if github:
+        url = "https://raw.githubusercontent.com/%s/%s/%s/manifest.json" % (
+            github.group(1),
+            github.group(2),
+            commit,
+        )
+        try:
+            with urllib.request.urlopen(url, timeout=15) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            if isinstance(payload, dict):
+                return str(payload.get("version") or "")
+        except (OSError, ValueError, urllib.error.URLError):
+            pass
+    # Any other host: read the blob through git, without touching the checkout.
+    if os.path.isdir(os.path.join(directory, ".git")):
+        text = git(directory, ["show", "%s:manifest.json" % commit])
+        if text:
+            try:
+                payload = json.loads(text)
+            except ValueError:
+                payload = None
+            if isinstance(payload, dict):
+                return str(payload.get("version") or "")
+    return ""
+
+
+def command_update_check(args):
+    """Compare one installed plugin with its upstream through the marketplace."""
+    plugin_id = required_id(args)
+    directory = plugin_directory(plugin_id)
+    review = {
+        "id": plugin_id,
+        "name": plugin_id,
+        "installed": "",
+        "latest": "",
+        "updateAvailable": False,
+        "listed": False,
+        "repo": "",
+        "source": "bundled",
+        "checkedAt": int(time.time()),
+    }
+
+    if not os.path.isdir(directory):
+        review["note"] = "Ships with Omarchy; it updates with the system"
+        return out(review)
+
+    manifest = read_json(os.path.join(directory, "manifest.json"), {}) or {}
+    if not isinstance(manifest, dict):
+        manifest = {}
+    review["name"] = str(manifest.get("name") or plugin_id)
+    review["installed"] = str(manifest.get("version") or "")
+
+    if not os.path.isdir(os.path.join(directory, ".git")):
+        review["source"] = "manual"
+        review["note"] = "Installed without git, so there is no upstream to compare"
+        return out(review)
+
+    repo = git(directory, ["remote", "get-url", "origin"]) or ""
+    entry = market_entry(market_registry(), plugin_id)
+    if entry:
+        review["listed"] = True
+        review["repo"] = entry["repo"] or repo
+        review["marketCommit"] = entry["commit"]
+    else:
+        review["repo"] = repo
+    review["source"] = "marketplace" if entry else "git"
+    review["commit"] = git(directory, ["rev-parse", "HEAD"]) or ""
+
+    if OFFLINE:
+        review["note"] = "Offline: showing the installed version only"
+        return out(review)
+
+    upstream = remote_head(review["repo"], (entry or {}).get("branch", ""))
+    if upstream == "":
+        review["note"] = "Could not reach the plugin's repository"
+        return out(review)
+
+    review["latestCommit"] = upstream
+    if upstream == review["commit"]:
+        review["latest"] = review["installed"]
+        review["note"] = "Up to date"
+        return out(review)
+
+    review["updateAvailable"] = True
+    review["latest"] = manifest_version_at(review["repo"], upstream, directory) or "a newer commit"
+    return out(review)
+
+
+def schedule_rescan(delay=0.8):
+    """Ask the shell to reload plugin code once this process has finished.
+
+    A rescan throws away the QML that started this update, so it runs detached
+    and slightly late: the caller still gets its JSON answer first.
+    """
+    if not LIVE:
+        return False
+    try:
+        subprocess.Popen(
+            ["sh", "-c", "sleep %s; omarchy-shell -q shell rescanPlugins" % delay],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
+
+
+def command_update(args):
+    """Pull one plugin to the commit update-check just reported."""
+    plugin_id = required_id(args)
+    directory = plugin_directory(plugin_id)
+    if not os.path.isdir(os.path.join(directory, ".git")):
+        return die("%s is not a git checkout, so it cannot be updated in place" % plugin_id)
+    if OFFLINE:
+        return die("offline")
+    try:
+        result = subprocess.run(
+            ["omarchy", "plugin", "update", plugin_id, "--yes"],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return die("cannot run omarchy plugin update: %s" % error)
+    if result.returncode != 0:
+        message = (result.stderr or result.stdout or "").strip()
+        return die(message.splitlines()[-1] if message else "update failed")
+    manifest = read_json(os.path.join(directory, "manifest.json"), {}) or {}
+    if not isinstance(manifest, dict):
+        manifest = {}
+    return out(
+        {
+            "id": plugin_id,
+            "version": str(manifest.get("version") or ""),
+            "name": str(manifest.get("name") or plugin_id),
+            "output": (result.stdout or "").strip(),
+            "rescan": schedule_rescan(),
+        }
+    )
+
+
+def command_rescan(_args):
+    """Ask the shell to re-read installed plugin code after an update."""
+    if not LIVE:
+        return out({"rescan": False})
+    try:
+        subprocess.run(
+            ["omarchy-shell", "-q", "shell", "rescanPlugins"],
+            timeout=10,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return out({"rescan": False})
+    return out({"rescan": True})
+
+
+COMMANDS = {
+    "init": command_init,
+    "summary": command_summary,
+    "bar-modules": command_bar_modules,
+    "fold": command_fold,
+    "eject": command_eject,
+    "eject-all": command_eject_all,
+    "toggle": command_toggle,
+    "active": command_active,
+    "reorder": command_reorder,
+    "update-check": command_update_check,
+    "update": command_update,
+    "rescan": command_rescan,
+}
+
+
+def main(argv):
+    if len(argv) < 2 or argv[1] in ("-h", "--help", "help"):
+        return out({"commands": sorted(COMMANDS)})
+    handler = COMMANDS.get(argv[1])
+    if handler is None:
+        return die("unknown command: %s" % argv[1])
+    return handler(argv[2:])
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

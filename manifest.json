@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.shayanshahravi.omafolder",
+  "name": "OmaFolder",
+  "version": "1.0.0",
+  "author": "Shayan Shahravi",
+  "license": "MIT",
+  "homepage": "https://github.com/shayanshahravi/OmaFolder",
+  "description": "Fold bar widgets into one folder icon with an interactive vertical drawer: click to toggle, hold to eject back onto the bar, drag to reorder or drop out.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "BarWidget.qml" },
+  "barWidget": {
+    "displayName": "OmaFolder",
+    "description": "A folder that holds folded bar widgets in a vertical drawer",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "left"
+  }
+}
