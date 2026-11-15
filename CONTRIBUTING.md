@@ -7,8 +7,8 @@ Thanks for wanting to improve OmaFolder.
 ```
 manifest.json      plugin contract (bar-widget, BarWidget.qml)
 BarWidget.qml      bar entry point: folder icon, badge, panel forwarding
-Drawer.qml         the drawer: panel lifecycle, state, drag & drop, manage view
-DrawerItem.qml     one row: icon, hold ring, tooltip, drag source and drop target
+Drawer.qml         the drawer: panel lifecycle, state, + view, right-click menu
+DrawerItem.qml     one row: icon, label, hover tooltip, click signals
 Model.js           pure helpers (icons, labels, ordering) — no QML types
 bin/omafolder-state  state engine: state.json + shell.json, JSON on stdout
 install.sh / uninstall.sh
@@ -27,22 +27,16 @@ python3 -m py_compile bin/omafolder-state
 shellcheck install.sh uninstall.sh
 
 ./tests/run.sh          # model logic, QML syntax, state engine
-./tests/run.sh --live   # also drives drag and drop inside the running shell
 ```
 
-Drag and drop has to be tested with drags, not clicks: `tests/run.sh --live`
-patches the installed copy with a short harness that calls the drawer's real
-`drag()` path from inside the shell, restarts the shell, checks the resulting
-order and bar layout, then reinstalls the clean copy. It restarts the shell
-twice, so run it deliberately.
-
-Test by hand, since the plugin only exists inside a running shell:
+Test by hand, since the plugin only exists inside a running shell and a plugin
+reload does not recompile an already-mounted panel:
 
 1. `./install.sh --local`
-2. `omarchy-shell shell rescanPlugins`
+2. `omarchy-restart-shell` (a `rescanPlugins` alone leaves the old panel live)
 3. `omarchy-shell shell toggle io.github.shayanshahravi.omafolder '{}'`
-4. Fold a widget, click it, hold it for three seconds, drag it out, and reopen
-   the drawer after a shell restart (`omarchy-restart-shell`).
+4. Click the folder, click `+`, fold a widget, then left-click that row and
+   check that its panel opens. Right-click a row and walk the menu.
 5. `cat ~/.config/omafolder/state.json` and
    `python3 -c "import json;print(json.load(open('$HOME/.config/omarchy/shell.json'))['bar']['layout'])"`
    to confirm the bar layout matches what you see.

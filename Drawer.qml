@@ -129,7 +129,7 @@ Panel {
   readonly property var menuRows: root.buildMenuRows()
 
   // Widgets the shell answered "unknown" for, remembered for this session so
-  // the menu stops offering a panel that does not exist.
+  // the menu can say so instead of failing silently.
   property var panellessIds: ({})
 
   // Per-plugin update check: the id being checked and the result awaiting a
@@ -238,18 +238,15 @@ Panel {
     var entry = root.items[index]
     if (!entry) return
     root.closeMenu()
-    if (root.isPanelless(entry)) {
-      root.showNotice(Model.noPanelNotice(entry))
-      return
-    }
-    // Only one panel at a time: the shell hands input from one full-screen
-    // panel to the next, and stacking them is what made the screen feel
-    // frozen. Close, then summon on the next tick.
+    // A folded widget is not in the bar layout, so the shell never built its
+    // IpcHandler and `summon` answers "unknown". Put it back on the bar first
+    // - that write reloads the shell and registers the handler - then summon
+    // the live instance. The widget stays on the bar afterwards.
     root.summoningId = String(entry.id || "")
     root.close()
     Qt.callLater(function() {
-      summonProcess.command = ["omarchy-shell", "shell", "summon", root.summoningId, "{}"]
-      summonProcess.running = true
+      ejectForSummonProcess.command = [root.engine, "eject", root.summoningId]
+      ejectForSummonProcess.running = true
     })
   }
 
@@ -272,12 +269,11 @@ Panel {
     var entry = root.menuItem()
     if (!entry) return []
     var index = root.menuIndex
-    var openable = !root.isPanelless(entry)
     return [
       {
         action: "summon",
-        label: openable ? "Open panel" : "Open panel (no panel)",
-        enabled: openable
+        label: "Open panel",
+        enabled: true
       },
       {
         action: "toggle",
@@ -464,7 +460,6 @@ Panel {
       var id = root.summoningId
       if (code === 0 && text === "ok") return
       if (text === "unknown" && id !== "") {
-        // Remember it for this session so the menu greys the entry out.
         var next = {}
         for (var key in root.panellessIds) next[key] = root.panellessIds[key]
         next[id] = true
@@ -475,6 +470,28 @@ Panel {
         "OmaFolder", "That widget has no panel of its own. Eject it to use it on the bar."
       ]
       notifyProcess.running = true
+    }
+  }
+
+  // Eject-then-summon: the eject puts the widget back in the bar layout, the
+  // shell reload registers its IpcHandler, and the summon lands on a real
+  // instance instead of answering "unknown".
+  Process {
+    id: ejectForSummonProcess
+    stdout: StdioCollector { id: ejectForSummonOutput; waitForEnd: true }
+    onExited: function(code) {
+      var payload = null
+      try { payload = JSON.parse(String(ejectForSummonOutput.text || "")) } catch (error) { payload = null }
+      if (code !== 0 || !payload || payload.ok === false) {
+        root.summoningId = ""
+        notifyProcess.command = [
+          "notify-send", "-a", "OmaFolder",
+          "OmaFolder", payload && payload.error ? String(payload.error) : "That widget could not go back to the bar"
+        ]
+        notifyProcess.running = true
+        return
+      }
+      summonTimer.restart()
     }
   }
 
@@ -514,6 +531,18 @@ Panel {
     id: noticeTimer
     interval: 2600
     onTriggered: root.notice = ""
+  }
+
+  // The eject write reloads the shell, so the widget only has a live instance a
+  // moment later; the summon has to wait for that reload.
+  Timer {
+    id: summonTimer
+    interval: 1500
+    onTriggered: {
+      if (root.summoningId === "") return
+      summonProcess.command = ["omarchy-shell", "shell", "summon", root.summoningId, "{}"]
+      summonProcess.running = true
+    }
   }
 
   // ---------------------------------------------------------------- panel
@@ -597,6 +626,9 @@ Panel {
                 width: strip.width
                 height: root.rowHeight
                 item: modelData
+                // With the list open the card is wide, so the folded rows show
+                // their names too, aligned exactly like the rows below the +.
+                showLabel: root.listOpen
                 origin: "folder"
                 position: index
                 hasCursor: root.cursorIndex === index

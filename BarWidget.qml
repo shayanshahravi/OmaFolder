@@ -18,6 +18,9 @@ BarWidget {
   function open() { if (panelLoader.item) panelLoader.item.open() }
   function close() { if (panelLoader.item) panelLoader.item.close() }
   function toggle() { if (panelLoader.item) panelLoader.item.toggle() }
+  // Re-read the state file. Named so broadcast("reload") can reach every bar
+  // instance from the single IPC handler.
+  function reload() { if (panelLoader.item) panelLoader.item.reload() }
   function closeForPopoutSwitch() {
     if (panelLoader.item) panelLoader.item.closeForPopoutSwitch()
   }
@@ -51,15 +54,28 @@ BarWidget {
     }
   }
 
-  IpcHandler {
-    target: "io.github.shayanshahravi.omafolder"
+  // The shell builds one bar per monitor, so this widget exists once per
+  // screen. A static IpcHandler in every copy makes the target collide and the
+  // shell drops all but the first ("another handler is registered for target"),
+  // which left IPC dead on the other monitors. Only the first screen registers
+  // the target, and every route relays through broadcast() so all instances
+  // answer the same call.
+  readonly property int screenIndex: (bar !== null && bar.screen && Quickshell.screens)
+    ? Quickshell.screens.indexOf(bar.screen) : -1
 
-    function refresh(): void { root.broadcast("reload") }
-    function open(): void { root.open() }
-    function close(): void { root.close() }
-    function show(): void { root.open() }
-    function hide(): void { root.close() }
-    function toggle(): void { root.toggle() }
+  Loader {
+    active: root.bar !== null && root.screenIndex === 0
+
+    sourceComponent: IpcHandler {
+      target: "io.github.shayanshahravi.omafolder"
+
+      function refresh(): void { root.broadcast("reload") }
+      function open(): void { root.broadcast("open") }
+      function close(): void { root.broadcast("close") }
+      function show(): void { root.broadcast("open") }
+      function hide(): void { root.broadcast("close") }
+      function toggle(): void { root.broadcast("toggle") }
+    }
   }
 
   BarIconButton {

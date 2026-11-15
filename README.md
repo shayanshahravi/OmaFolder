@@ -4,8 +4,7 @@
 
 **A folder on the Omarchy bar that holds the widgets you rarely need.** Fold a
 bar widget into it and it leaves the bar; open the folder to get a vertical
-drawer of what is inside, and pull anything back out with a three-second hold or
-a drag.
+drawer of what is inside and get it back out of the way.
 
 Built for **Omarchy 4 (Quattro)**: a native Quickshell `bar-widget`, no Waybar
 and no extra desktop process.
@@ -16,22 +15,28 @@ and no extra desktop process.
 
 | Interaction | What happens |
 |---|---|
-| Left click on the folder | Opens or closes the vertical drawer (it slides up from the bar) |
-| Left click on an icon | Opens that widget's own panel |
-| **Right click on an icon** | Action menu: open panel, activate/deactivate, move up, move down, eject to bar |
-| **Drag an icon inside the drawer** | Reorders it |
-| **Drag an icon out of the drawer** | Ejects it back onto the bar at the position it came from |
-| **Drag (or click) in the ＋ view** | Folds a widget from the bar into the folder |
-| `j` / `k`, Enter, `x`, `m`, Escape | Keyboard: move, open, eject, manage view, close |
+| Left click on the folder | Opens or closes the vertical drawer (it slides up out of the bar) |
+| Left click on a folded row | Runs that widget's primary action: opens its own panel. A widget that only exists on the bar (no panel plugin) is handed back to the bar and opened there |
+| Left click on the **＋** button | Turns it 45° into **×**, widens the drawer and lists every bar widget that is not folded yet |
+| Left click on a row under **×** | Folds that widget into the folder; the drawer stays open |
+| **Right click on a folded row** | Action menu: open panel, activate/deactivate, move up, move down, check for update, eject to bar |
+| Hover a row for 1.5 s | Tooltip with the widget's name, state and type |
+| `j` / `k`, Enter, `x`, `m`, `c`, Escape | Keyboard: move, open, eject, `＋` view, update check, close |
 
-The drawer is a 32 px strip: the icon keeps about a pixel of space on each
-side. Everything that changes a widget — activate, deactivate, reorder, eject —
-lives in the right-click menu, so a stray click on an icon never changes anything.
+While **×** is open the whole drawer grows to the width of a list and every row -
+folded above **×** and available below it - shows its icon on the left and its
+full name next to it, in the same column and the same padding. Clicking **×**
+again collapses it back to the 32 px icon strip.
 
-A deactivated widget is dimmed in the drawer and its panel is closed. Because a
-folded widget has already left the bar, there is no background output left to
-suspend — QML has no CSS `filter: grayscale()`, so "deactivated" is expressed by
-dimming rather than a grayscale filter.
+The drawer is a 32 px icon strip when closed: the icon keeps about a pixel of
+space on each side. Everything that changes a widget - activate, deactivate,
+reorder, eject - lives in the right-click menu, so a stray click never moves
+anything.
+
+A deactivated widget is dimmed in the drawer and its own panel is closed. Because
+a folded widget has already left the bar there is no background output left to
+suspend, and QML has no CSS `filter: grayscale()`, so "deactivated" is expressed
+by dimming rather than a grayscale filter.
 
 ## Install
 
@@ -58,9 +63,10 @@ second shell process.
 ## Usage
 
 1. Click the folder icon to open the drawer.
-2. Press **＋** at the bottom to list the widgets still on your bar.
-3. Click one to fold it in, or drag it onto the folder.
-4. Hold an icon for three seconds (or drag it out) to put it back on the bar.
+2. Press **＋** to widen it and list the widgets still on your bar.
+3. Click one to fold it in.
+4. Click a folded row to open that widget's panel, or right-click it to eject it
+   back to the bar where it came from.
 
 ## How it works
 
@@ -84,6 +90,8 @@ bin/omafolder-state fold <id>
 bin/omafolder-state eject <id>
 bin/omafolder-state toggle <id>
 bin/omafolder-state reorder <id> <index>
+bin/omafolder-state update-check <id>
+bin/omafolder-state update <id>
 bin/omafolder-state eject-all      # used by uninstall.sh
 ```
 
@@ -98,6 +106,10 @@ omarchy-shell shell toggle io.github.shayanshahravi.omafolder '{}'
 omarchy-shell shell call io.github.shayanshahravi.omafolder refresh
 ```
 
+The IPC target is registered once, by the first screen's bar widget, and every
+route is relayed to the other monitors' instances, so a call behaves the same on
+a multi-monitor setup.
+
 ## Move or remove
 
 ```sh
@@ -111,12 +123,14 @@ omarchy bar move io.github.shayanshahravi.omafolder --section right --index 0
 
 ## Notes
 
-- Only widgets that are currently on the bar can be folded; the manage view
-  lists exactly those.
+- Only widgets that are currently on the bar can be folded; the **＋** view lists
+  exactly those.
+- A folded widget has no live bar instance, so the shell cannot summon its panel
+  directly. Clicking such a row returns it to the bar first and opens it there.
 - `omarchy.tray` is pinned by the built-in bar. Folding it works, but Omarchy may
   pin it back on the next bar rebuild.
-- Widgets with a panel open it with `omarchy-shell shell toggle <id>`; widgets
-  without one show a short notice instead.
+- "Check for update" asks the official Omarchy plugin market for the published
+  version and only installs after you confirm in the drawer.
 
 ## Development
 
@@ -126,12 +140,7 @@ omarchy plugin validate .
 python3 -m py_compile bin/omafolder-state
 
 ./tests/run.sh          # model logic, QML syntax, state engine
-./tests/run.sh --live   # + drag and drop inside the running shell
 ```
-
-The live suite drives the drawer's real drag path (begin, move, hit test, drop
-rule, state write) from inside `omarchy-shell`, then reinstalls the clean copy.
-It restarts the shell twice, so run it deliberately.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 

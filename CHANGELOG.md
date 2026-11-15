@@ -5,6 +5,42 @@ All notable changes to OmaFolder are documented here. This project follows
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-15
+
+### Fixed
+
+- Left click on a folded row now opens that widget's panel. A folded widget has
+  no live bar instance, so the drawer ejects it back onto the bar first and then
+  summons the panel on the real instance instead of failing with "unknown" and a
+  notice.
+- The drawer no longer clips its first row: the card height is built from exact
+  section heights (strip, `+`, list, update prompt, notice) instead of implicit
+  layout heights, and the card grows upward as the list opens.
+- The `+` button opens the plugin list directly underneath it, and the drawer
+  grows upward to fit the rows. Long lists and long folders scroll instead of
+  running past the screen.
+- Icons drew as literal `\uf111` text: the glyph table in `Model.js` was
+  double-escaped and is now a normal escape.
+- `IpcHandler` is registered once, by the first screen's bar widget, and every
+  route relays to the other monitors' instances. This removes the
+  `Handler was registered but will not be used because another handler is
+  registered for target io.github.shayanshahravi.omafolder` warning and makes IPC
+  work on every monitor.
+
+### Changed
+
+- With the `+` view open the folded rows show their full names too, left-aligned
+  in the same icon column and padding as the rows below the `+`.
+- Right-click menu entries for widgets without a panel are no longer greyed out:
+  "Open panel" now works for them through the eject-then-summon path.
+- `README.md` and `README.fa.md` rewritten: accurate left-click, `+`/`×`,
+  right-click and tooltip documentation in both languages.
+
+### Removed
+
+- Every remaining drag-and-drop reference, including the documentation, the live
+  test suite and its `--live` flag. The drawer is click and keyboard only.
+
 ## [1.0.0] - 2026-11-15
 
 ### Added
@@ -15,16 +51,14 @@ All notable changes to OmaFolder are documented here. This project follows
   up out of the bar when it opens.
 - Left click on an icon opens that widget's own panel.
 - Right-click menu per icon: open panel, activate/deactivate, move up, move down,
-  eject to bar. Nothing changes on a plain click.
-- Drag and drop with manual pointer tracking (Qt's internal drag does not start
-  inside a layer-shell surface): drag inside the drawer to reorder, drag out to
-  eject, drag from the manage view to fold a widget in. An insertion marker shows
-  where the row will land, and releasing outside shows an eject hint.
+  eject to bar.
 - 1500 ms hover tooltip with the widget's name, state and type.
 - Keyboard control: `j`/`k` or arrows, Enter, `x` to eject, `m` for the manage
   view, Escape to close.
-- `tests/run.sh` (model logic, QML syntax, state engine) and `tests/run.sh --live`,
-  which drives a real drag inside the running shell.
+- Per-plugin update check against the official Omarchy plugin market, with a
+  confirmation step before anything is installed.
+- `tests/run.sh` (model logic, QML syntax, state engine) and
+  `tests/engine.test.py` for the state engine.
 - `bin/omafolder-state` engine: JSON state file, exact-position restore on eject,
   atomic writes and a `shell.json` backup per change.
 - Idempotent `install.sh` (with `--local` for development) and `uninstall.sh`

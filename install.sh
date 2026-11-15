@@ -80,7 +80,7 @@ omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
 omarchy plugin enable "$PLUGIN_ID" >/dev/null 2>&1 || true
 
 # Place the folder on the bar only when it is not there yet: an existing entry
-# keeps whatever position the user dragged it to.
+# keeps whatever position the user moved it to.
 if ! python3 - "$SHELL_JSON" "$PLUGIN_ID" <<'PY'
 import json, sys
 path, plugin = sys.argv[1], sys.argv[2]
