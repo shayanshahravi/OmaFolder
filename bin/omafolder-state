@@ -29,6 +29,7 @@ plugin named on the command line.
 
 from __future__ import annotations
 
+import codecs
 import gzip
 import json
 import os
@@ -294,6 +295,43 @@ def has_panel(meta):
     return any(marker in source for marker in PANEL_MARKERS)
 
 
+# Any quoted \uXXXX (or surrogate-pair) literal in the entry point. Widgets put
+# theirs behind a ternary often enough that anchoring on `text:` misses them.
+GLYPH_PATTERN = re.compile(r'"((?:\\u[0-9a-fA-F]{4}){1,4})"')
+
+
+def decode_glyph(escaped):
+    """Turn a "\\uF03E" style literal into the character QML would draw."""
+    try:
+        raw = codecs.decode(escaped, "unicode_escape")
+        return raw.encode("utf-16", "surrogatepass").decode("utf-16")
+    except (UnicodeDecodeError, UnicodeEncodeError, ValueError):
+        return ""
+
+
+def glyph_for(meta):
+    """Read the first icon literal the widget's entry point draws.
+
+    Bar widgets keep their glyph in the QML, not in the manifest, so the drawer
+    can only show the same icon by reading it out of the file. Widgets whose
+    entry point has nothing literal keep an empty icon and the view falls back
+    to the plugin's initial.
+    """
+    path = meta.get("barWidgetPath") or ""
+    if path == "":
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as stream:
+            source = stream.read()
+    except OSError:
+        return ""
+    for match in GLYPH_PATTERN.finditer(source):
+        glyph = decode_glyph(match.group(1))
+        if glyph:
+            return glyph
+    return ""
+
+
 def describe(kinds):
     labels = []
     for kind in kinds or []:
@@ -326,6 +364,7 @@ def enrich(state):
                 "name": meta.get("name") or entry["id"],
                 "kinds": kinds,
                 "kindLabel": describe(kinds) or "Bar widget",
+                "icon": glyph_for(meta),
                 "summonable": any(
                     kind in ("bar-widget", "panel", "menu", "overlay", "bar") for kind in kinds
                 ),
@@ -378,6 +417,7 @@ def command_bar_modules(_args):
                     "section": section,
                     "index": position,
                     "panel": has_panel(meta),
+                    "icon": glyph_for(meta),
                 }
             )
     return out({"modules": modules})

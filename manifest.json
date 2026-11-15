@@ -6,7 +6,7 @@
   "author": "Shayan Shahravi",
   "license": "MIT",
   "homepage": "https://github.com/shayanshahravi/OmaFolder",
-  "description": "Fold bar widgets into one folder icon with an interactive vertical drawer: click to toggle, hold to eject back onto the bar, drag to reorder or drop out.",
+  "description": "Fold bar widgets into one folder icon with an interactive vertical drawer: left click a row to open its panel, right click for actions, and fold widgets back in from the + list.",
   "kinds": ["bar-widget"],
   "entryPoints": { "barWidget": "BarWidget.qml" },
   "barWidget": {

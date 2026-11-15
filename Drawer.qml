@@ -761,7 +761,8 @@ Panel {
                 active: true,
                 kindLabel: "On the bar",
                 summonable: false,
-                panel: modelData.panel !== false
+                panel: modelData.panel !== false,
+                icon: modelData.icon || ""
               })
               origin: "bar"
               position: index

@@ -142,5 +142,40 @@ class UpdateCheckTest(unittest.TestCase):
         self.assertIn("not a git checkout", payload["error"])
 
 
+class GlyphTest(unittest.TestCase):
+    """The drawer draws each widget's own icon, read from its entry point."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        self.engine = load_engine(self.home)
+
+    def write_widget(self, body):
+        path = self.home / "BarWidget.qml"
+        path.write_text(body, encoding="utf-8")
+        return str(path)
+
+    def test_a_plain_escape_decodes_to_the_character(self):
+        self.assertEqual(self.engine.decode_glyph("\\uF03E"), "\uf03e")
+
+    def test_a_surrogate_pair_decodes_to_one_glyph(self):
+        self.assertEqual(self.engine.decode_glyph("\\udb85\\udcd3"), "\U000f14d3")
+
+    def test_the_first_literal_in_the_entry_point_wins(self):
+        path = self.write_widget(
+            "BarIconButton {\n  text: root.opened ? \"\\udb85\\udcd3\" : \"\\udb85\\udcd9\"\n}\n"
+        )
+        self.assertEqual(self.engine.glyph_for({"barWidgetPath": path}), "\U000f14d3")
+
+    def test_a_widget_without_a_glyph_keeps_an_empty_icon(self):
+        path = self.write_widget("Rectangle {\n  color: \"red\"\n}\n")
+        self.assertEqual(self.engine.glyph_for({"barWidgetPath": path}), "")
+
+    def test_a_missing_entry_point_is_not_an_error(self):
+        self.assertEqual(self.engine.glyph_for({"barWidgetPath": ""}), "")
+        self.assertEqual(self.engine.glyph_for({"barWidgetPath": "/nope/none.qml"}), "")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

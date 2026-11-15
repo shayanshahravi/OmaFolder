@@ -24,7 +24,12 @@ Item {
   readonly property string itemId: item ? String(item.id || "") : ""
   readonly property string title: Model.title(item)
   readonly property string subtitle: Model.subtitle(item)
-  readonly property string glyph: item ? Model.iconFor(item.id) : ""
+  // The widget's own glyph (read from its entry point by the engine) wins over
+  // the built-in table, so a plugin whose icon is not in Model.js still shows
+  // the icon it draws on the bar instead of a bare letter.
+  readonly property string glyph: item
+    ? (String(item.icon || "") || Model.iconFor(item.id))
+    : ""
   readonly property bool hasGlyph: glyph !== ""
   readonly property color rowColor: active ? displayColor : Util.alpha(displayColor, 0.4)
   // Read-only views of the hover tooltip, used by the tests.
