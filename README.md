@@ -16,15 +16,17 @@ and no extra desktop process.
 
 | Interaction | What happens |
 |---|---|
-| Left click on the folder | Opens or closes the vertical drawer |
-| Left click on a drawer icon | Activates / deactivates that widget |
-| Right click on a drawer icon | Opens that widget's own panel, when it has one |
-| **Hold for 3 s** | Ejects the widget back onto the bar at the position it came from, with a progress ring while you hold |
-| **Hover for 1.5 s** | A themed tooltip with the widget's name, state and type |
-| **Drag inside the drawer** | Reorders the drawer |
-| **Drag out of the drawer** | Ejects the widget back onto the bar |
-| **Drag from "＋"** | Lists the widgets still on the bar so you can drag one in |
-| `j` / `k`, Enter, `x`, `m`, Escape | Keyboard: move, toggle, eject, manage view, close |
+| Left click on the folder | Opens or closes the vertical drawer (it slides up from the bar) |
+| Left click on an icon | Opens that widget's own panel |
+| **Right click on an icon** | Action menu: open panel, activate/deactivate, move up, move down, eject to bar |
+| **Drag an icon inside the drawer** | Reorders it |
+| **Drag an icon out of the drawer** | Ejects it back onto the bar at the position it came from |
+| **Drag (or click) in the ＋ view** | Folds a widget from the bar into the folder |
+| `j` / `k`, Enter, `x`, `m`, Escape | Keyboard: move, open, eject, manage view, close |
+
+The drawer is a 32 px strip: the icon keeps about a pixel of space on each
+side. Everything that changes a widget — activate, deactivate, reorder, eject —
+lives in the right-click menu, so a stray click on an icon never changes anything.
 
 A deactivated widget is dimmed in the drawer and its panel is closed. Because a
 folded widget has already left the bar, there is no background output left to
@@ -122,7 +124,14 @@ omarchy bar move io.github.shayanshahravi.omafolder --section right --index 0
 omarchy plugin validate .
 /usr/lib/qt6/bin/qmllint -I "$OMARCHY_PATH/shell" BarWidget.qml Drawer.qml DrawerItem.qml
 python3 -m py_compile bin/omafolder-state
+
+./tests/run.sh          # model logic, QML syntax, state engine
+./tests/run.sh --live   # + drag and drop inside the running shell
 ```
+
+The live suite drives the drawer's real drag path (begin, move, hit test, drop
+rule, state write) from inside `omarchy-shell`, then reinstalls the clean copy.
+It restarts the shell twice, so run it deliberately.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 

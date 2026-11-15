@@ -130,6 +130,27 @@ function dropIndex(from, to) {
   return target
 }
 
+// Decide what a finished drag should do. `inside` says whether the pointer was
+// still over the drawer when the button came up, and `target` is the row index
+// the pointer was nearest to.
+//
+//   eject    a folder row dropped outside the drawer goes back onto the bar
+//   fold     a manage row dropped inside the drawer joins the folder
+//   reorder  a folder row moved onto another row takes its place
+//   same     dropped on itself, nothing to do
+//   none     a manage row dropped outside the drawer, or an unknown origin
+function resolveDrop(origin, from, target, inside, count) {
+  var source = String(origin || "")
+  if (source !== "folder" && source !== "bar") return { action: "none" }
+  if (!inside) return source === "folder" ? { action: "eject" } : { action: "none" }
+  if (source === "bar") return { action: "fold" }
+  var total = Number(count) || 0
+  var to = Number(target)
+  if (!isFinite(to) || to < 0 || to >= total) return { action: "none" }
+  if (to === Number(from)) return { action: "same" }
+  return { action: "reorder", index: to }
+}
+
 function summaryLine(count) {
   var value = Number(count) || 0
   if (value === 0) return "No folded widgets"

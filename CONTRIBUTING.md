@@ -25,7 +25,16 @@ omarchy plugin validate .
 /usr/lib/qt6/bin/qmllint -I "$OMARCHY_PATH/shell" BarWidget.qml Drawer.qml DrawerItem.qml
 python3 -m py_compile bin/omafolder-state
 shellcheck install.sh uninstall.sh
+
+./tests/run.sh          # model logic, QML syntax, state engine
+./tests/run.sh --live   # also drives drag and drop inside the running shell
 ```
+
+Drag and drop has to be tested with drags, not clicks: `tests/run.sh --live`
+patches the installed copy with a short harness that calls the drawer's real
+`drag()` path from inside the shell, restarts the shell, checks the resulting
+order and bar layout, then reinstalls the clean copy. It restarts the shell
+twice, so run it deliberately.
 
 Test by hand, since the plugin only exists inside a running shell:
 
