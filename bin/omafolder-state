@@ -19,17 +19,27 @@ Commands:
   toggle <id>                   flip an item's active state
   reorder <id> <index>          move an item to a new position in the drawer
   active <id> <true|false>      set an item's active state explicitly
+  update-check <id>             compare an installed plugin with the marketplace
+  update <id>                   pull the checked-out plugin to its latest commit
+  rescan                        ask the shell to pick up newly installed plugin code
+
+Only ``update-check`` and ``update`` touch the network, and only for the one
+plugin named on the command line.
 """
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 
 PLUGIN_ID = "io.github.shayanshahravi.omafolder"
 SECTIONS = ("left", "center", "right")
@@ -43,6 +53,20 @@ SHELL_PATH = os.environ.get("OMAFOLDER_SHELL") or os.path.join(
 BACKUP_DIR = os.path.join(HOME, ".local", "state", "omafolder", "backups")
 # Test runs point the engine at throwaway files; never poke the live shell then.
 LIVE = not (os.environ.get("OMAFOLDER_STATE") or os.environ.get("OMAFOLDER_SHELL"))
+
+# The community marketplace omarchy.org links to for third-party plugins. The
+# registry indexes every listed repository, which is how a plugin id is turned
+# back into the repository whose upstream commits we compare against.
+MARKET_URL = (
+    "https://raw.githubusercontent.com/omacom/omarchy-plugin-marketplace/main/registry.json"
+)
+CACHE_DIR = os.path.join(HOME, ".cache", "omafolder")
+MARKET_CACHE = os.environ.get("OMAFOLDER_MARKET_CACHE") or os.path.join(
+    CACHE_DIR, "market-registry.json"
+)
+# A day-old registry is good enough to answer "is a newer version out?".
+MARKET_TTL = 24 * 3600
+OFFLINE = bool(os.environ.get("OMAFOLDER_OFFLINE"))
 
 
 def out(payload):
@@ -205,20 +229,22 @@ def reload_shell():
 
 
 def plugin_index():
-    """Map plugin id -> {name, kinds} from the shell's discovery list."""
+    """Map plugin id -> {name, kinds, barWidgetPath} from the plugin catalog."""
     try:
         result = subprocess.run(
-            ["omarchy", "plugin", "list", "--json"],
+            ["omarchy-plugin-catalog"],
             capture_output=True,
             text=True,
-            timeout=8,
+            timeout=12,
             check=False,
         )
         rows = json.loads(result.stdout or "[]")
     except (OSError, subprocess.SubprocessError, ValueError):
         return {}
+    if not isinstance(rows, list):
+        return {}
     index = {}
-    for row in rows if isinstance(rows, list) else []:
+    for row in rows:
         if not isinstance(row, dict):
             continue
         plugin_id = str(row.get("id") or "")
@@ -228,8 +254,44 @@ def plugin_index():
         index[plugin_id] = {
             "name": str(row.get("name") or plugin_id),
             "kinds": kinds if isinstance(kinds, list) else [],
+            "barWidgetPath": str(row.get("barWidgetPath") or ""),
         }
     return index
+
+
+# Kinds whose panels are owned by the shell's panel loader rather than by the
+# bar widget itself.
+LOADER_KINDS = ("panel", "overlay", "menu")
+# A bar widget draws its own panel when its entry point opens one of these.
+PANEL_MARKERS = (
+    "PopupCard",
+    "KeyboardPanel",
+    "PopupWindow",
+    "Dropdown",
+    "function open(",
+)
+
+
+def has_panel(meta):
+    """Whether clicking the widget can open a panel of its own.
+
+    The shell decides this at runtime; here we only need a static answer so the
+    "Open panel" menu entry can be greyed out instead of failing with a freeze.
+    A plugin we cannot inspect is left enabled -- a notice beats hiding a
+    working action.
+    """
+    kinds = meta.get("kinds") or []
+    if any(kind in LOADER_KINDS for kind in kinds):
+        return True
+    path = meta.get("barWidgetPath") or ""
+    if path == "":
+        return True
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as stream:
+            source = stream.read()
+    except OSError:
+        return True
+    return any(marker in source for marker in PANEL_MARKERS)
 
 
 def describe(kinds):
@@ -267,6 +329,7 @@ def enrich(state):
                 "summonable": any(
                     kind in ("bar-widget", "panel", "menu", "overlay", "bar") for kind in kinds
                 ),
+                "panel": has_panel(meta),
             }
         )
     return items
@@ -314,6 +377,7 @@ def command_bar_modules(_args):
                     "name": meta.get("name") or plugin_id,
                     "section": section,
                     "index": position,
+                    "panel": has_panel(meta),
                 }
             )
     return out({"modules": modules})
@@ -467,6 +531,303 @@ def required_id(args):
     return str(args[0]).strip()
 
 
+# ------------------------------------------------------------------ marketplace
+
+
+def plugin_directory(plugin_id):
+    return os.path.join(HOME, ".config", "omarchy", "plugins", plugin_id)
+
+
+def atomic_write_text(path, text):
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    handle, temp = tempfile.mkstemp(dir=directory, prefix=".omafolder-", suffix=".json")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(text)
+        os.replace(temp, path)
+    except BaseException:
+        if os.path.exists(temp):
+            os.unlink(temp)
+        raise
+
+
+def fetch_market():
+    """Download the marketplace registry, or None when the network says no."""
+    request = urllib.request.Request(
+        MARKET_URL,
+        headers={"User-Agent": "OmaFolder", "Accept-Encoding": "gzip"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read()
+            if str(response.headers.get("Content-Encoding") or "").lower() == "gzip":
+                raw = gzip.decompress(raw)
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, ValueError, urllib.error.URLError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def read_cache(path):
+    try:
+        with open(path, "r", encoding="utf-8") as stream:
+            payload = json.load(stream)
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def market_registry():
+    """The marketplace index, cached for a day. None when unavailable."""
+    if OFFLINE:
+        return None
+    cached = read_cache(MARKET_CACHE)
+    fresh = False
+    if isinstance(cached, dict):
+        try:
+            fresh = (time.time() - os.path.getmtime(MARKET_CACHE)) < MARKET_TTL
+        except OSError:
+            fresh = False
+    if fresh:
+        return cached
+    fetched = fetch_market()
+    if fetched is None:
+        return cached if isinstance(cached, dict) else None
+    try:
+        atomic_write_text(MARKET_CACHE, json.dumps(fetched, separators=(",", ":")))
+    except OSError:
+        pass
+    return fetched
+
+
+def market_entry(registry, plugin_id):
+    """Marketplace record for one plugin id: its repository and listed commit."""
+    if not isinstance(registry, dict):
+        return None
+    for source in registry.get("sources") or []:
+        if not isinstance(source, dict):
+            continue
+        plugins = source.get("plugins")
+        if not isinstance(plugins, dict) or plugin_id not in plugins:
+            continue
+        return {
+            "repo": str(source.get("repo") or ""),
+            "branch": str(source.get("listingValidatedBranch") or ""),
+            "commit": str(source.get("listingValidatedCommit") or ""),
+        }
+    return None
+
+
+def git(directory, args, timeout=15):
+    """stdout of a git command, or None when it failed."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", directory] + list(args),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def remote_head(repo, branch=""):
+    """Commit the remote branch points at right now, without fetching it."""
+    if repo == "":
+        return ""
+    ref = "refs/heads/%s" % branch if branch else "HEAD"
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", repo, ref],
+            capture_output=True,
+            text=True,
+            timeout=25,
+            check=False,
+            env=dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="true"),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if result.returncode != 0:
+        return ""
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            return parts[0]
+    return ""
+
+
+def manifest_version_at(repo, commit, directory):
+    """Version string from manifest.json at `commit`, or '' when unknown."""
+    if commit == "":
+        return ""
+    github = re.match(
+        r"^(?:https?://|git@)github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?$", repo
+    )
+    if github:
+        url = "https://raw.githubusercontent.com/%s/%s/%s/manifest.json" % (
+            github.group(1),
+            github.group(2),
+            commit,
+        )
+        try:
+            with urllib.request.urlopen(url, timeout=15) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            if isinstance(payload, dict):
+                return str(payload.get("version") or "")
+        except (OSError, ValueError, urllib.error.URLError):
+            pass
+    # Any other host: read the blob through git, without touching the checkout.
+    if os.path.isdir(os.path.join(directory, ".git")):
+        text = git(directory, ["show", "%s:manifest.json" % commit])
+        if text:
+            try:
+                payload = json.loads(text)
+            except ValueError:
+                payload = None
+            if isinstance(payload, dict):
+                return str(payload.get("version") or "")
+    return ""
+
+
+def command_update_check(args):
+    """Compare one installed plugin with its upstream through the marketplace."""
+    plugin_id = required_id(args)
+    directory = plugin_directory(plugin_id)
+    review = {
+        "id": plugin_id,
+        "name": plugin_id,
+        "installed": "",
+        "latest": "",
+        "updateAvailable": False,
+        "listed": False,
+        "repo": "",
+        "source": "bundled",
+        "checkedAt": int(time.time()),
+    }
+
+    if not os.path.isdir(directory):
+        review["note"] = "Ships with Omarchy; it updates with the system"
+        return out(review)
+
+    manifest = read_json(os.path.join(directory, "manifest.json"), {}) or {}
+    if not isinstance(manifest, dict):
+        manifest = {}
+    review["name"] = str(manifest.get("name") or plugin_id)
+    review["installed"] = str(manifest.get("version") or "")
+
+    if not os.path.isdir(os.path.join(directory, ".git")):
+        review["source"] = "manual"
+        review["note"] = "Installed without git, so there is no upstream to compare"
+        return out(review)
+
+    repo = git(directory, ["remote", "get-url", "origin"]) or ""
+    entry = market_entry(market_registry(), plugin_id)
+    if entry:
+        review["listed"] = True
+        review["repo"] = entry["repo"] or repo
+        review["marketCommit"] = entry["commit"]
+    else:
+        review["repo"] = repo
+    review["source"] = "marketplace" if entry else "git"
+    review["commit"] = git(directory, ["rev-parse", "HEAD"]) or ""
+
+    if OFFLINE:
+        review["note"] = "Offline: showing the installed version only"
+        return out(review)
+
+    upstream = remote_head(review["repo"], (entry or {}).get("branch", ""))
+    if upstream == "":
+        review["note"] = "Could not reach the plugin's repository"
+        return out(review)
+
+    review["latestCommit"] = upstream
+    if upstream == review["commit"]:
+        review["latest"] = review["installed"]
+        review["note"] = "Up to date"
+        return out(review)
+
+    review["updateAvailable"] = True
+    review["latest"] = manifest_version_at(review["repo"], upstream, directory) or "a newer commit"
+    return out(review)
+
+
+def schedule_rescan(delay=0.8):
+    """Ask the shell to reload plugin code once this process has finished.
+
+    A rescan throws away the QML that started this update, so it runs detached
+    and slightly late: the caller still gets its JSON answer first.
+    """
+    if not LIVE:
+        return False
+    try:
+        subprocess.Popen(
+            ["sh", "-c", "sleep %s; omarchy-shell -q shell rescanPlugins" % delay],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
+
+
+def command_update(args):
+    """Pull one plugin to the commit update-check just reported."""
+    plugin_id = required_id(args)
+    directory = plugin_directory(plugin_id)
+    if not os.path.isdir(os.path.join(directory, ".git")):
+        return die("%s is not a git checkout, so it cannot be updated in place" % plugin_id)
+    if OFFLINE:
+        return die("offline")
+    try:
+        result = subprocess.run(
+            ["omarchy", "plugin", "update", plugin_id, "--yes"],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return die("cannot run omarchy plugin update: %s" % error)
+    if result.returncode != 0:
+        message = (result.stderr or result.stdout or "").strip()
+        return die(message.splitlines()[-1] if message else "update failed")
+    manifest = read_json(os.path.join(directory, "manifest.json"), {}) or {}
+    if not isinstance(manifest, dict):
+        manifest = {}
+    return out(
+        {
+            "id": plugin_id,
+            "version": str(manifest.get("version") or ""),
+            "name": str(manifest.get("name") or plugin_id),
+            "output": (result.stdout or "").strip(),
+            "rescan": schedule_rescan(),
+        }
+    )
+
+
+def command_rescan(_args):
+    """Ask the shell to re-read installed plugin code after an update."""
+    if not LIVE:
+        return out({"rescan": False})
+    try:
+        subprocess.run(
+            ["omarchy-shell", "-q", "shell", "rescanPlugins"],
+            timeout=10,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return out({"rescan": False})
+    return out({"rescan": True})
+
+
 COMMANDS = {
     "init": command_init,
     "summary": command_summary,
@@ -477,6 +838,9 @@ COMMANDS = {
     "toggle": command_toggle,
     "active": command_active,
     "reorder": command_reorder,
+    "update-check": command_update_check,
+    "update": command_update,
+    "rescan": command_rescan,
 }
 
 

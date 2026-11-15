@@ -6,11 +6,17 @@ import qs.Ui
 import "Model.js" as Model
 
 // The vertical drawer behind the folder icon.
-//
 // It owns no state of its own beyond what it renders: every mutation goes
 // through bin/omafolder-state, which rewrites state.json and the bar layout in
 // shell.json and then asks the shell to reload. That keeps the drawer, the bar
 // and a shell restart in agreement.
+//
+// Two things are deliberately drawn inside this panel rather than in popups:
+// the + button's plugin list and the right-click menu. A popup anchored to a
+// row of a layer-shell panel lands wherever the anchor maths says instead of
+// under the pointer, and its focus grab fights the panel for input - which is
+// what made the old menu appear at the top of the screen and freeze the shell.
+
 Panel {
   id: root
   moduleName: "io.github.shayanshahravi.omafolder"
@@ -25,7 +31,7 @@ Panel {
   // file instead of hardcoding a path under ~/.config/omarchy/plugins.
   readonly property string engine: {
     var url = Qt.resolvedUrl("bin/omafolder-state").toString()
-    return url.replace(/^file:\/\//, "")
+    return url.replace(/^file:/, "")
   }
 
   readonly property color contentColor: bar && bar.foreground !== undefined ? bar.foreground : Color.foreground
@@ -35,35 +41,110 @@ Panel {
   // A 32px strip with 2px of card padding: the icon keeps roughly a pixel of
   // breathing room on each side instead of sitting in a fat column.
   readonly property int stripWidth: Style.space(32)
-  readonly property int manageWidth: Style.space(204)
+  readonly property int listWidth: Style.space(198)
   readonly property int cardPadding: Style.space(2)
-  readonly property int cardWidth: (manageOpen ? manageWidth : stripWidth) + cardPadding * 2 + Style.space(2)
   readonly property int rowHeight: Style.space(32)
+  // The menu lives in the space the card gains when it widens, so it can sit
+  // beside the strip the pointer is on instead of on top of it.
+  readonly property int menuWidth: Math.max(Style.space(150), listWidth - stripWidth - Style.spacing.sm)
+  readonly property int menuRowHeight: Style.space(24)
+
+  // ---------------------------------------------------------------- geometry
+  //
+  // The card is sized from these numbers instead of from implicit layout
+  // heights. The panel hangs off the bar, so whatever the card does not count
+  // is cut off at the top edge - which is what hid the first row. Every
+  // section carries its own gap and an exact height, and the card is the sum.
+  readonly property int rowGap: Style.spacing.xxs
+  readonly property int footerHeight: Style.space(28)
+  readonly property int lineHeight: Math.round(Style.font.caption * 1.45)
+  readonly property int confirmHeight: Style.space(26)
+  readonly property int menuHeight: root.menuRows.length * root.menuRowHeight + Style.spacing.xs * 2
+
+  readonly property int stripContentHeight: root.items.length === 0
+    ? 0
+    : root.items.length * root.rowHeight + (root.items.length - 1) * root.rowGap
+  readonly property int listHeaderHeight: Math.round(root.lineHeight * 1.8)
+  readonly property int listContentHeight: root.availableWidgets.length === 0
+    ? root.lineHeight
+    : root.availableWidgets.length * root.rowHeight + (root.availableWidgets.length - 1) * root.rowGap
+
+  // What the panel can hand to the card. The rest of the sections are taken
+  // out of that budget before the rows get their share, so the card can never
+  // grow past the space the panel offers.
+  readonly property int bodyCap: Math.max(root.rowHeight + root.footerHeight,
+    Math.round(panel.availableCardHeight - panel.verticalContentInset))
+  readonly property int promptHeight: root.updatePrompt === null ? 0
+    : root.lineHeight * 4 + root.confirmHeight + Style.spacing.xs * 2 + root.rowGap
+  readonly property int noticeHeight: (root.notice !== "" || root.checkingId !== "") ? root.lineHeight + root.rowGap : 0
+  readonly property int emptyHeight: (root.empty && !root.loading) ? root.lineHeight + root.rowGap : 0
+
+  readonly property int reservedHeight: root.footerHeight + root.rowGap + root.promptHeight + root.noticeHeight + root.emptyHeight
+  readonly property int stripViewport: Math.min(root.stripContentHeight,
+    Math.max(root.rowHeight, root.bodyCap - root.reservedHeight - root.rowGap * 2))
+  readonly property int listViewport: root.listOpen
+    ? Math.min(root.listHeaderHeight + root.listContentHeight + root.rowGap,
+        Math.max(root.rowHeight * 2,
+          root.bodyCap - root.reservedHeight - root.stripViewport - root.rowGap * 3))
+    : 0
+
+  readonly property int stripSectionHeight: root.stripViewport > 0 ? root.stripViewport + root.rowGap : 0
+  readonly property int addSectionHeight: root.footerHeight + root.rowGap
+  readonly property int listSectionHeight: root.listOpen ? root.listViewport + root.rowGap : 0
+  readonly property int wantedHeight: root.stripSectionHeight + root.emptyHeight + root.addSectionHeight
+    + root.listSectionHeight + root.promptHeight + root.noticeHeight
+  readonly property int bodyHeight: Math.max(root.menuOpen ? root.menuHeight : 0,
+    Math.min(root.bodyCap, root.wantedHeight))
+
+  // The card widens whenever something with words is showing - the plugin
+  // list, the right-click menu or the update prompt - and stays a slim strip
+  // otherwise.
+  readonly property bool wide: root.listOpen || root.menuOpen || root.updatePrompt !== null
+  readonly property int cardWidth: (wide ? listWidth : stripWidth) + cardPadding * 2 + Style.space(2)
+
+  // How far the rows sit from the top of the key catcher, needed to place the
+  // right-click menu at the row the pointer is on.
+  readonly property real bodyOffset: body.y + stripSection.y + stripFlick.y - stripFlick.contentY
 
   property var items: []
   property var barModules: []
-  property bool manageOpen: false
   property bool loading: true
   property bool busy: false
   property string notice: ""
   property int cursorIndex: -1
 
-  // Drag state. The pointer position is tracked in `viewport` coordinates so
-  // "inside the drawer" is a plain bounds check.
-  property bool dragActive: false
-  property string dragId: ""
-  property string dragOrigin: ""
-  property int dragFrom: -1
-  property point dragPoint: Qt.point(0, 0)
-  property int dropIndex: -1
+  // The + button: closed it is a plus, open the same glyph has turned 45° into
+  // a cross and the list of foldable bar widgets has grown underneath it.
+  property bool listOpen: false
 
-  // Right-click menu target.
-  property var menuRow: null
+  readonly property var availableWidgets: (root.barModules || []).filter(function (module) {
+    return String(module.id || "") !== "io.github.shayanshahravi.omafolder"
+  })
+
+  // Right-click menu, drawn inside the panel at the pointer.
+  property bool menuOpen: false
   property int menuIndex: -1
+  property real menuX: 0
+  property real menuY: 0
+  readonly property var menuRows: root.buildMenuRows()
+
+  // Widgets the shell answered "unknown" for, remembered for this session so
+  // the menu stops offering a panel that does not exist.
+  property var panellessIds: ({})
+
+  // Per-plugin update check: the id being checked and the result awaiting a
+  // yes/no before anything is installed.
+  property string checkingId: ""
+  property var updatePrompt: null
+
+  // Cursor row inside the open menu, for keyboard walking.
+  property int menuCursor: 0
+  // Widget the pending summon call is for, read when it answers.
+  property string summoningId: ""
 
   readonly property int itemCount: items.length
-  readonly property bool draggingFolderRow: dragActive && dragOrigin === "folder"
-  readonly property bool dropOutside: dragActive && (dragPoint.y < 0 || dragPoint.y > viewport.height)
+
+  // ---------------------------------------------------------------- state
 
   function reload() {
     if (!summaryProcess.running) summaryProcess.running = true
@@ -104,168 +185,211 @@ Panel {
     engineProcess.running = true
   }
 
-  function toggleManage() {
-    root.manageOpen = !root.manageOpen
-    if (root.manageOpen) root.reloadModules()
+  // ---------------------------------------------------------------- list
+
+  function toggleList() {
+    root.listOpen = !root.listOpen
+    if (root.listOpen) {
+      root.closeMenu()
+      root.reloadModules()
+    }
+    if (root.cursorIndex >= root.items.length) root.cursorIndex = root.items.length - 1
+  }
+
+  function fold(id) {
+    if (root.busy) return
+    root.runEngine(["fold", String(id)])
+  }
+
+  // ---------------------------------------------------------------- items
+
+  function isPanelless(item) {
+    if (!item) return true
+    if (root.panellessIds[String(item.id || "")] === true) return true
+    return item.panel === false
+  }
+
+  // Fold/eject rewrite the bar layout and reload the shell, which tears this
+  // panel down mid-callback. Close first so the reload never lands on a live
+  // drawer - that reload was a second way to wedge the shell.
+  function runLayoutEngine(args) {
+    root.closeMenu()
+    root.close()
+    Qt.callLater(function() {
+      layoutProcess.command = [root.engine].concat(args)
+      layoutProcess.running = true
+    })
   }
 
   function toggleItem(index) {
     var entry = root.items[index]
     if (!entry) return
+    root.closeMenu()
     root.runEngine(["toggle", String(entry.id)])
-    if (entry.active === true) {
-      hideProcess.command = ["omarchy-shell", "-q", "shell", "hide", String(entry.id)]
-      hideProcess.running = true
-    }
   }
 
   function eject(index) {
     var entry = root.items[index]
     if (!entry) return
-    root.runEngine(["eject", String(entry.id)])
-  }
-
-  function fold(id) {
-    root.runEngine(["fold", String(id)])
+    root.runLayoutEngine(["eject", String(entry.id)])
   }
 
   function summon(index) {
     var entry = root.items[index]
     if (!entry) return
-    summonProcess.command = ["omarchy-shell", "shell", "toggle", String(entry.id), "{}"]
-    summonProcess.running = true
+    root.closeMenu()
+    if (root.isPanelless(entry)) {
+      root.showNotice(Model.noPanelNotice(entry))
+      return
+    }
+    // Only one panel at a time: the shell hands input from one full-screen
+    // panel to the next, and stacking them is what made the screen feel
+    // frozen. Close, then summon on the next tick.
+    root.summoningId = String(entry.id || "")
+    root.close()
+    Qt.callLater(function() {
+      summonProcess.command = ["omarchy-shell", "shell", "summon", root.summoningId, "{}"]
+      summonProcess.running = true
+    })
   }
 
-  function reorderTo(index) {
-    if (!root.dragActive || root.dragOrigin !== "folder" || root.dragFrom < 0) return
-    if (index < 0 || index >= root.items.length) return
-    if (index === root.dragFrom) return
-    root.runEngine(["reorder", root.dragId, String(index)])
+  function moveItem(from, to) {
+    var entry = root.items[from]
+    if (!entry) return
+    if (to < 0 || to >= root.items.length) return
+    root.closeMenu()
+    root.runEngine(["reorder", String(entry.id), String(to)])
   }
 
   // ---------------------------------------------------------------- menu
 
-  function openMenu(row, index) {
-    if (!row) return
-    root.menuRow = row
+  function menuItem() {
+    if (root.menuIndex < 0 || root.menuIndex >= root.items.length) return null
+    return root.items[root.menuIndex]
+  }
+
+  function buildMenuRows() {
+    var entry = root.menuItem()
+    if (!entry) return []
+    var index = root.menuIndex
+    var openable = !root.isPanelless(entry)
+    return [
+      {
+        action: "summon",
+        label: openable ? "Open panel" : "Open panel (no panel)",
+        enabled: openable
+      },
+      {
+        action: "toggle",
+        label: entry.active === true ? "Deactivate" : "Activate",
+        enabled: true
+      },
+      { action: "up", label: "Move up", enabled: index > 0 },
+      { action: "down", label: "Move down", enabled: index >= 0 && index < root.items.length - 1 },
+      { action: "update", label: "Check for update", enabled: true },
+      { action: "eject", label: "Eject to bar", enabled: true }
+    ]
+  }
+
+  function openMenu(index, atY) {
     root.menuIndex = index
-    menuPopup.open = true
+    root.listOpen = false
+    // Open beside the pointer: `atY` is where the click landed inside the row,
+    // so the menu can be centred on it and only then pulled back inside the
+    // card. The strip is 32px wide, so its right edge is where the menu starts.
+    var height = root.menuRows.length * root.menuRowHeight + Style.spacing.xs * 2
+    var x = Math.min(root.stripWidth + Style.spacing.xs, Math.max(0, root.listWidth - root.menuWidth))
+    var y = atY - height / 2
+    root.menuX = Math.max(0, x)
+    root.menuY = Math.max(0, Math.min(y, keyCatcher.height - height))
+    root.menuOpen = true
   }
 
   function closeMenu() {
-    menuPopup.open = false
-    root.menuRow = null
+    root.menuOpen = false
+    root.menuIndex = -1
   }
 
-  // ---------------------------------------------------------------- dragging
-
-  function beginDrag(source) {
-    if (!source) return
-    root.dragActive = true
-    root.dragId = source.itemId
-    root.dragOrigin = source.origin
-    root.dragFrom = source.origin === "folder" ? source.position : -1
-    root.dropIndex = -1
+  function chooseMenu(action) {
+    var index = root.menuIndex
     root.closeMenu()
+    if (action === "summon") root.summon(index)
+    else if (action === "toggle") root.toggleItem(index)
+    else if (action === "eject") root.eject(index)
+    else if (action === "update") root.checkUpdate(index)
+    else if (action === "up") root.moveItem(index, index - 1)
+    else if (action === "down") root.moveItem(index, index + 1)
   }
 
-  function moveDrag(x, y) {
-    if (!root.dragActive) return
-    root.dragPoint = Qt.point(x, y)
-    root.dropIndex = root.draggingFolderRow ? indexAt(y) : (y >= 0 && y <= viewport.height ? root.items.length : -1)
+  // ---------------------------------------------------------------- updates
+
+  function checkUpdate(index) {
+    var entry = root.items[index]
+    if (!entry) return
+    root.closeMenu()
+    root.updatePrompt = null
+    root.notice = ""
+    root.checkingId = String(entry.id)
+    checkProcess.command = [root.engine, "update-check", String(entry.id)]
+    checkProcess.running = true
   }
 
-  function endDrag(x, y) {
-    if (!root.dragActive) return
-    var inside = y >= 0 && y <= viewport.height && x >= 0 && x <= viewport.width
-    var origin = root.dragOrigin
-    var id = root.dragId
-    var from = root.dragFrom
-    var target = root.dropIndex
-
-    root.dragActive = false
-    root.dragId = ""
-    root.dragOrigin = ""
-    root.dragFrom = -1
-    root.dropIndex = -1
-    root.dragPoint = Qt.point(0, 0)
-
-    // The decision itself lives in Model.resolveDrop so it can be tested
-    // without a running shell.
-    var plan = Model.resolveDrop(origin, from, target, inside, root.items.length)
-    if (plan.action === "fold") root.fold(id)
-    else if (plan.action === "eject") {
-      root.runEngine(["eject", id])
-      root.showNotice("Ejected back to the bar")
-    } else if (plan.action === "reorder") root.runEngine(["reorder", id, String(plan.index)])
-    else if (plan.action === "same") root.showNotice("Dropped where it started")
-  }
-
-  // Which row the pointer is over, by nearest row centre.
-  function resetDrag() {
-    root.dragActive = false
-    root.dragId = ""
-    root.dragOrigin = ""
-    root.dragFrom = -1
-    root.dropIndex = -1
-    root.dragPoint = Qt.point(0, 0)
-  }
-
-  // Which row the pointer is over, by nearest row centre.
-  function indexAt(y) {
-    var repeater = stripRepeater
-    if (!repeater || repeater.count === 0) return -1
-    var best = -1
-    var bestDistance = Infinity
-    for (var i = 0; i < repeater.count; i++) {
-      var row = repeater.itemAt(i)
-      if (!row) continue
-      var centre = row.mapToItem(viewport, 0, row.height / 2).y
-      var distance = Math.abs(centre - y)
-      if (distance < bestDistance) {
-        bestDistance = distance
-        best = i
-      }
+  function applyUpdateCheck(code, text) {
+    root.checkingId = ""
+    var payload = null
+    try { payload = JSON.parse(String(text || "")) } catch (error) { payload = null }
+    if (!payload || payload.ok === false) {
+      root.showNotice(payload && payload.error ? payload.error : "Could not check for updates")
+      return
     }
-    return best
+    if (payload.updateAvailable === true) {
+      root.notice = ""
+      root.updatePrompt = payload
+      return
+    }
+    root.showNotice(Model.updateSummary(payload))
   }
 
-  // Drive one complete drag without a pointer: the same begin/move/end path a
-  // mouse takes, so automation (and the test suite) exercises the real hit
-  // testing and drop rules rather than a shortcut around them.
-  // `target` is a row index, or "out" to release outside the drawer.
-  function drag(fromIndex, target) {
-    var rows = stripRepeater
-    if (!rows || rows.count === 0) return JSON.stringify({ ok: false, error: "the drawer is empty" })
-    var from = Math.max(0, Math.min(Number(fromIndex) || 0, rows.count - 1))
-    var row = rows.itemAt(from)
-    if (!row) return JSON.stringify({ ok: false, error: "no row at " + from })
+  function installUpdate() {
+    var prompt = root.updatePrompt
+    if (!prompt) return
+    root.updatePrompt = null
+    root.closeMenu()
+    root.close()
+    Qt.callLater(function() {
+      updateProcess.command = [root.engine, "update", String(prompt.id)]
+      updateProcess.running = true
+    })
+  }
 
-    var y = -1
-    if (String(target) !== "out") {
-      var to = Math.max(0, Math.min(Number(target) || 0, rows.count - 1))
-      var targetRow = rows.itemAt(to)
-      if (!targetRow) return JSON.stringify({ ok: false, error: "no row at " + to })
-      y = targetRow.mapToItem(viewport, 0, targetRow.height / 2).y
-    }
-
-    root.beginDrag(row)
-    root.moveDrag(viewport.width / 2, y)
-    var resolved = root.dropIndex
-    root.endDrag(viewport.width / 2, y)
-    return JSON.stringify({ ok: true, from: from, dropIndex: resolved, target: String(target) })
+  function cancelUpdate() {
+    root.updatePrompt = null
   }
 
   // ---------------------------------------------------------------- keyboard
 
   function moveCursor(dx, dy) {
-    if (root.manageOpen && dy !== 0) return
+    if (root.menuOpen) {
+      // j/k walk the menu while it is up.
+      if (root.menuRows.length === 0) return
+      var next = root.menuCursor + dy
+      if (next < 0) next = 0
+      if (next > root.menuRows.length - 1) next = root.menuRows.length - 1
+      root.menuCursor = next
+      return
+    }
+    if (root.listOpen && dy !== 0) return
     if (root.items.length === 0) return
-    var next = root.cursorIndex < 0 ? 0 : root.cursorIndex + dy
-    root.cursorIndex = Model.clampIndex(next, root.items.length)
+    var target = root.cursorIndex < 0 ? 0 : root.cursorIndex + dy
+    root.cursorIndex = Model.clampIndex(target, root.items.length)
   }
 
   function activateCursor() {
+    if (root.menuOpen) {
+      var row = root.menuRows[root.menuCursor]
+      if (row && row.enabled) root.chooseMenu(row.action)
+      return
+    }
     if (root.cursorIndex >= 0) root.summon(root.cursorIndex)
   }
 
@@ -278,7 +402,8 @@ Panel {
       root.reload()
     } else {
       root.closeMenu()
-      root.resetDrag()
+      root.listOpen = false
+      root.updatePrompt = null
     }
   }
   Component.onCompleted: root.reload()
@@ -309,8 +434,25 @@ Panel {
       if (code !== 0 || !payload || payload.ok === false) {
         root.showNotice(payload && payload.error ? payload.error : "That did not work")
       }
-      if (root.manageOpen) root.reloadModules()
+      if (root.listOpen) root.reloadModules()
       root.reload()
+    }
+  }
+
+  // Layout mutations reload the shell, so they report through a notification
+  // instead of a notice the closing drawer would swallow.
+  Process {
+    id: layoutProcess
+    stdout: StdioCollector { id: layoutOutput; waitForEnd: true }
+    onExited: function(code) {
+      var payload = null
+      try { payload = JSON.parse(String(layoutOutput.text || "")) } catch (error) { payload = null }
+      if (code === 0 && payload && payload.ok !== false) return
+      notifyProcess.command = [
+        "notify-send", "-a", "OmaFolder",
+        "OmaFolder", payload && payload.error ? String(payload.error) : "That did not work"
+      ]
+      notifyProcess.running = true
     }
   }
 
@@ -319,14 +461,52 @@ Panel {
     stdout: StdioCollector { id: summonOutput; waitForEnd: true }
     onExited: function(code) {
       var text = String(summonOutput.text || "").trim()
-      if (code !== 0 || text === "" || text.indexOf("unknown") === 0) {
-        root.showNotice("That widget has no panel of its own — eject it to use it")
+      var id = root.summoningId
+      if (code === 0 && text === "ok") return
+      if (text === "unknown" && id !== "") {
+        // Remember it for this session so the menu greys the entry out.
+        var next = {}
+        for (var key in root.panellessIds) next[key] = root.panellessIds[key]
+        next[id] = true
+        root.panellessIds = next
       }
+      notifyProcess.command = [
+        "notify-send", "-a", "OmaFolder",
+        "OmaFolder", "That widget has no panel of its own. Eject it to use it on the bar."
+      ]
+      notifyProcess.running = true
     }
   }
 
   Process {
-    id: hideProcess
+    id: checkProcess
+    stdout: StdioCollector { id: checkOutput; waitForEnd: true }
+    onExited: function(code) { root.applyUpdateCheck(code, checkOutput.text) }
+  }
+
+  Process {
+    id: updateProcess
+    stdout: StdioCollector { id: updateOutput; waitForEnd: true }
+    onExited: function(code) {
+      var payload = null
+      try { payload = JSON.parse(String(updateOutput.text || "")) } catch (error) { payload = null }
+      if (code === 0 && payload && payload.ok !== false) {
+        notifyProcess.command = [
+          "notify-send", "-a", "OmaFolder", "OmaFolder",
+          Model.updatedMessage(payload)
+        ]
+      } else {
+        notifyProcess.command = [
+          "notify-send", "-a", "OmaFolder", "-u", "critical", "OmaFolder update failed",
+          payload && payload.error ? String(payload.error) : "The plugin could not be updated"
+        ]
+      }
+      notifyProcess.running = true
+    }
+  }
+
+  Process {
+    id: notifyProcess
     command: []
   }
 
@@ -336,83 +516,7 @@ Panel {
     onTriggered: root.notice = ""
   }
 
-  // ---------------------------------------------------------------- menu popup
-
-  PopupCard {
-    id: menuPopup
-    anchorItem: root.menuRow ? root.menuRow : root
-    bar: root.bar
-    owner: root
-    open: false
-    margin: Style.gapsOut
-    padding: Style.spacing.xs
-    contentWidth: Style.space(184)
-    contentHeight: menuColumn.implicitHeight + menuPopup.padding * 2
-    onOpenChanged: if (!open) root.menuRow = null
-
-    Column {
-      id: menuColumn
-      width: parent.width
-      spacing: Style.spacing.xxs
-
-      readonly property var entry: root.menuIndex >= 0 && root.menuIndex < root.items.length ? root.items[root.menuIndex] : null
-      readonly property var actions: [
-        { action: "summon", label: "Open panel", enabled: true },
-        { action: "toggle", label: menuColumn.entry && menuColumn.entry.active === true ? "Deactivate" : "Activate", enabled: true },
-        { action: "up", label: "Move up", enabled: root.menuIndex > 0 },
-        { action: "down", label: "Move down", enabled: root.menuIndex >= 0 && root.menuIndex < root.items.length - 1 },
-        { action: "eject", label: "Eject to bar", enabled: true }
-      ]
-
-      Repeater {
-        model: menuColumn.actions
-
-        Item {
-          required property var modelData
-          width: menuColumn.width
-          height: Style.space(26)
-
-          Rectangle {
-            anchors.fill: parent
-            radius: Style.cornerRadius
-            color: menuMouse.containsMouse && parent.modelData.enabled
-              ? Util.alpha(root.contentColor, Style.hoverFillAlpha)
-              : "transparent"
-          }
-
-          Text {
-            anchors.verticalCenter: parent.verticalCenter
-            anchors.left: parent.left
-            anchors.leftMargin: Style.spacing.xs
-            text: parent.modelData.label
-            color: Util.alpha(root.contentColor, parent.modelData.enabled ? 0.92 : 0.35)
-            font.family: root.contentFont
-            font.pixelSize: Style.font.caption
-          }
-
-          MouseArea {
-            id: menuMouse
-            anchors.fill: parent
-            enabled: parent.modelData.enabled
-            hoverEnabled: true
-            cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-            onClicked: {
-              var action = parent.modelData.action
-              var index = root.menuIndex
-              menuPopup.open = false
-              if (action === "summon") root.summon(index)
-              else if (action === "toggle") root.toggleItem(index)
-              else if (action === "eject") root.eject(index)
-              else if (action === "up" && index > 0) root.runEngine(["reorder", root.items[index].id, String(index - 1)])
-              else if (action === "down" && index < root.items.length - 1) root.runEngine(["reorder", root.items[index].id, String(index + 1)])
-            }
-          }
-        }
-      }
-    }
-  }
-
-  // ---------------------------------------------------------------- drawer
+  // ---------------------------------------------------------------- panel
 
   KeyboardPanel {
     id: panel
@@ -423,178 +527,411 @@ Panel {
     focusTarget: keyCatcher
     padding: root.cardPadding
     contentWidth: panel.fittedContentWidth(root.cardWidth)
-    contentHeight: panel.fittedContentHeight(column.implicitHeight)
+    // The card grows to fit the menu when it is open, so the menu never has to
+    // spill outside the clickable surface.
+    contentHeight: panel.fittedContentHeight(root.bodyHeight)
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      onCloseRequested: root.close()
+
+      onCloseRequested: {
+        if (root.menuOpen) root.closeMenu()
+        else if (root.updatePrompt !== null) root.cancelUpdate()
+        else if (root.listOpen) root.listOpen = false
+        else root.close()
+      }
       onMoveRequested: function(dx, dy) { root.moveCursor(dx, dy) }
       onActivateRequested: root.activateCursor()
       onDeleteRequested: root.ejectCursor()
       onTextKey: function(text) {
-        if (text === "m" || text === "+") root.toggleManage()
+        if (text === "m" || text === "+") root.toggleList()
+        else if (text === "c") {
+          if (root.cursorIndex >= 0) root.checkUpdate(root.cursorIndex)
+        }
       }
 
-      // The strip grows out of the bar: content rides up from below the card
-      // while the card itself fades in.
-      Item {
-        id: viewport
+      // Everything stacks in one column of exactly sized sections, so the card
+      // cannot clip a row at its top edge.
+      Column {
+        id: body
         width: parent.width
-        height: column.implicitHeight
-        clip: true
+        height: root.bodyHeight
+        spacing: 0
 
-        Column {
-          id: column
-          width: viewport.width
-          spacing: Style.spacing.xxs
-          y: root.opened ? 0 : viewport.height
+        // The strip grows out of the bar: content rides up from below the card
+        // while the card itself fades in. The rows scroll when the folder holds
+        // more than the panel can show.
+        Item {
+          id: stripSection
+          width: body.width
+          height: root.stripSectionHeight
 
-          Behavior on y {
-            NumberAnimation { duration: 190; easing.type: Easing.OutCubic }
+          Flickable {
+            id: stripFlick
+            width: parent.width
+            height: root.stripViewport
+            contentHeight: strip.implicitHeight
+            boundsBehavior: Flickable.StopAtBounds
+            clip: true
+            interactive: root.stripViewport < strip.implicitHeight
+
+            Column {
+              id: strip
+              width: stripFlick.width
+              spacing: root.rowGap
+              y: root.opened ? 0 : stripFlick.height
+
+            Behavior on y {
+              NumberAnimation { duration: 190; easing.type: Easing.OutCubic }
+            }
+
+            Repeater {
+              model: root.items
+
+              DrawerItem {
+                id: stripRow
+                required property var modelData
+                required property int index
+
+                width: strip.width
+                height: root.rowHeight
+                item: modelData
+                origin: "folder"
+                position: index
+                hasCursor: root.cursorIndex === index
+                displayColor: root.contentColor
+                accentColor: Color.accent
+
+                onSummonRequested: root.summon(index)
+                onMenuRequested: function(row, atX, atY) {
+                  root.cursorIndex = index
+                  // The row itself knows where it sits inside the column, so the
+                  // pointer offset only has to be added to that.
+                  root.openMenu(index, root.bodyOffset + stripRow.y + atY)
+                }
+              }
+            }
+            }
+          }
+        }
+
+        Text {
+          visible: root.empty && !root.loading
+          width: body.width
+          height: root.emptyHeight
+          text: "Empty"
+          color: Util.alpha(root.contentColor, 0.55)
+          font.family: root.contentFont
+          font.pixelSize: Style.font.caption
+          horizontalAlignment: Text.AlignHCenter
+          topPadding: Style.spacing.xs
+        }
+
+        // ------------------------------------------------ footer: + button
+        Item {
+          id: addButton
+          width: body.width
+          height: root.addSectionHeight
+
+          Item {
+            id: addFace
+            width: parent.width
+            height: root.footerHeight
+
+            Rectangle {
+              anchors.fill: parent
+              radius: Style.cornerRadius
+              color: root.listOpen
+                ? Util.alpha(root.contentColor, Style.hoverFillAlpha)
+                : (addMouse.containsMouse ? Util.alpha(root.contentColor, Style.hoverFillAlpha) : "transparent")
+            }
+
+            Text {
+              id: addGlyph
+              anchors.centerIn: parent
+              // A plain plus, not a private-use glyph: the theme's font does not
+              // carry every icon code point and a missing one draws nothing.
+              text: "+"
+              color: root.contentColor
+              font.family: root.contentFont
+              font.pixelSize: Style.space(16)
+
+              // 0° is a plus, 45° is a cross: the same glyph, rotated.
+              transform: Rotation {
+                origin.x: addGlyph.width / 2
+                origin.y: addGlyph.height / 2
+                angle: root.listOpen ? 45 : 0
+
+                Behavior on angle {
+                  NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
+                }
+              }
+            }
+
+            MouseArea {
+              id: addMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.toggleList()
+            }
+          }
+        }
+
+        // ------------------------------------------------ plugin list (+ button)
+        // The list is the + button's open state: it opens right under the + and
+        // the card grows upward to make room, scrolling when the bar holds more
+        // widgets than the panel can show.
+        Item {
+          id: listSection
+          width: body.width
+          height: root.listSectionHeight
+          visible: root.listOpen
+
+          Flickable {
+            id: listFlick
+            width: parent.width
+            height: root.listViewport
+            contentHeight: foldList.implicitHeight
+            boundsBehavior: Flickable.StopAtBounds
+            clip: true
+            interactive: root.listViewport < foldList.implicitHeight
+
+            Column {
+              id: foldList
+              width: listFlick.width
+              spacing: root.rowGap
+
+          Text {
+            width: parent.width
+            topPadding: Style.spacing.xs
+            bottomPadding: Style.spacing.xxs
+            text: "Fold a widget into OmaFolder"
+            color: Util.alpha(root.contentColor, 0.6)
+            font.family: root.contentFont
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
           }
 
           Repeater {
-            id: stripRepeater
-            model: root.items
+            model: root.availableWidgets
 
             DrawerItem {
               required property var modelData
               required property int index
 
-              width: column.width
+              width: foldList.width
               height: root.rowHeight
-              item: modelData
-              origin: "folder"
+              item: ({
+                id: modelData.id,
+                name: modelData.name,
+                active: true,
+                kindLabel: "On the bar",
+                summonable: false,
+                panel: modelData.panel !== false
+              })
+              origin: "bar"
               position: index
+              showLabel: true
               displayColor: root.contentColor
               accentColor: Color.accent
-              dragLayer: viewport
-              hasCursor: root.cursorIndex === index
-              dropTarget: root.draggingFolderRow && root.dropIndex === index && root.dragFrom !== index
 
-              onSummonRequested: root.summon(index)
-              onMenuRequested: function(row) { root.openMenu(row, index) }
-              onDragBegan: root.beginDrag(this)
-              onDragMoved: function(x, y) { root.moveDrag(x, y) }
-              onDragEnded: function(x, y) { root.endDrag(x, y) }
+              onSummonRequested: root.fold(modelData.id)
+              // A list row has no actions of its own; right-click folds nothing.
+              onMenuRequested: function(row, atX, atY) {}
+            }
+          }
+
+          Text {
+            visible: root.availableWidgets.length === 0
+            width: parent.width
+            text: "Everything on the bar is already folded"
+            color: Util.alpha(root.contentColor, 0.5)
+            font.family: root.contentFont
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+            }
+          }
+        }
+
+        // ------------------------------------------------ update prompt
+        Item {
+          id: promptSection
+          width: body.width
+          height: root.promptHeight
+          visible: root.updatePrompt !== null
+
+          Column {
+            id: updateCard
+            width: parent.width
+            spacing: Style.spacing.xs
+
+            Text {
+              objectName: "updateTitle"
+              width: parent.width
+              height: root.lineHeight
+              text: root.updatePrompt === null ? "" : Model.updateTitle(root.updatePrompt)
+              color: root.contentColor
+              font.family: root.contentFont
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              elide: Text.ElideRight
+            }
+
+            Text {
+              width: parent.width
+              height: root.lineHeight * 3
+              text: root.updatePrompt === null ? "" : Model.updateBody(root.updatePrompt)
+              color: Util.alpha(root.contentColor, 0.7)
+              font.family: root.contentFont
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+              maximumLineCount: 3
+              elide: Text.ElideRight
+            }
+
+            Row {
+              height: root.confirmHeight
+              spacing: Style.spacing.xs
+
+            Repeater {
+              model: [
+                { label: "Install", action: "install", primary: true },
+                { label: "Later", action: "later", primary: false }
+              ]
+
+              Item {
+                required property var modelData
+                width: (updateCard.width - Style.spacing.xs) / 2
+                height: Style.space(26)
+
+                Rectangle {
+                  anchors.fill: parent
+                  radius: Style.cornerRadius
+                  color: modelData.primary
+                    ? Util.alpha(Color.accent, confirmMouse.containsMouse ? 0.35 : 0.22)
+                    : Util.alpha(root.contentColor, confirmMouse.containsMouse ? Style.hoverFillAlpha : 0)
+                }
+
+                Text {
+                  anchors.centerIn: parent
+                  text: modelData.label
+                  color: modelData.primary ? root.contentColor : Util.alpha(root.contentColor, 0.7)
+                  font.family: root.contentFont
+                  font.pixelSize: Style.font.caption
+                }
+
+                MouseArea {
+                  id: confirmMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    if (modelData.action === "install") root.installUpdate()
+                    else root.cancelUpdate()
+                  }
+                }
+              }
+            }
+          }
+          }
+        }
+
+        // ------------------------------------------------ notice
+        Text {
+          visible: root.notice !== "" || root.checkingId !== ""
+          width: body.width
+          height: root.noticeHeight
+          text: root.checkingId !== "" ? "Checking " + Model.shortName(root.checkingId) + "…" : root.notice
+          color: root.checkingId !== "" ? Util.alpha(root.contentColor, 0.7) : Color.urgent
+          font.family: root.contentFont
+          font.pixelSize: Style.font.caption
+          maximumLineCount: 1
+          elide: Text.ElideRight
+        }
+
+      }
+
+      // ------------------------------------------------ right-click menu
+      BorderSurface {
+        id: menuCard
+        visible: root.menuOpen
+        x: root.menuX
+        y: root.menuY
+        width: root.menuWidth
+        height: menuColumn.implicitHeight + Style.spacing.xs * 2
+        z: 200
+        radius: Style.cornerRadius
+        color: Color.popups.background
+        borderSpec: Border.localOrSurfaceSpec(
+          "popups", "border", Color.popups.border, Color.popups.border,
+          Math.max(1, Style.space(1))
+        )
+
+        // Swallow clicks on the padding so they cannot reach a row behind.
+        MouseArea {
+          anchors.fill: parent
+          acceptedButtons: Qt.AllButtons
+        }
+
+        Column {
+          id: menuColumn
+          anchors.fill: parent
+          anchors.margins: Style.spacing.xs
+          spacing: 0
+
+          Repeater {
+            model: root.menuRows
+
+            Item {
+              required property var modelData
+              required property int index
+
+              width: menuColumn.width
+              height: root.menuRowHeight
+
+              Rectangle {
+                anchors.fill: parent
+                radius: Style.cornerRadius
+                color: rowMouse.containsMouse && modelData.enabled
+                  ? Util.alpha(root.contentColor, Style.hoverFillAlpha)
+                  : (root.menuCursor === index && modelData.enabled
+                    ? Util.alpha(root.contentColor, Style.hoverFillAlpha * 0.7)
+                    : "transparent")
+              }
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.left: parent.left
+                anchors.leftMargin: Style.spacing.sm
+                text: modelData.label
+                color: Util.alpha(root.contentColor, modelData.enabled ? 0.92 : 0.35)
+                font.family: root.contentFont
+                font.pixelSize: Style.font.caption
+              }
+
+              MouseArea {
+                id: rowMouse
+                anchors.fill: parent
+                enabled: modelData.enabled
+                hoverEnabled: true
+                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: root.chooseMenu(modelData.action)
+              }
             }
           }
         }
       }
+    }
+  }
 
-      Text {
-        visible: root.empty && !root.loading
-        width: parent.width
-        text: "Empty"
-        color: Util.alpha(root.contentColor, 0.55)
-        font.family: root.contentFont
-        font.pixelSize: Style.font.caption
-        horizontalAlignment: Text.AlignHCenter
-        topPadding: Style.spacing.xs
-      }
-
-      // Footer: manage view toggle.
-      Item {
-        width: parent.width
-        height: Style.space(26)
-
-        Rectangle {
-          anchors.fill: parent
-          radius: Style.cornerRadius
-          color: manageMouse.containsMouse ? Util.alpha(root.contentColor, Style.hoverFillAlpha) : "transparent"
-        }
-
-        Text {
-          anchors.centerIn: parent
-          text: root.manageOpen ? "\uf00d" : "\uf067"
-          color: root.contentColor
-          font.family: root.contentFont
-          font.pixelSize: Style.font.body
-        }
-
-        MouseArea {
-          id: manageMouse
-          anchors.fill: parent
-          hoverEnabled: true
-          cursorShape: Qt.PointingHandCursor
-          onClicked: root.toggleManage()
-        }
-      }
-
-      // Manage view: everything still on the bar, one click or one drag away.
-      Column {
-        visible: root.manageOpen
-        width: parent.width
-        spacing: Style.spacing.xxs
-
-        Text {
-          width: parent.width
-          text: "Click to fold, or drag into the folder"
-          color: Util.alpha(root.contentColor, 0.6)
-          font.family: root.contentFont
-          font.pixelSize: Style.font.caption
-          wrapMode: Text.WordWrap
-          topPadding: Style.spacing.xs
-        }
-
-        Repeater {
-          model: root.barModules
-
-          DrawerItem {
-            required property var modelData
-            required property int index
-
-            width: parent.width
-            height: root.rowHeight
-            item: ({ id: modelData.id, name: modelData.name, active: true, kindLabel: "On the bar", summonable: false })
-            origin: "bar"
-            position: index
-            displayColor: root.contentColor
-            accentColor: Color.accent
-            dragLayer: viewport
-            showLabel: true
-            dropTarget: root.dragActive && root.dragOrigin === "bar" && root.dropIndex === root.items.length
-
-            onSummonRequested: root.fold(modelData.id)
-            onMenuRequested: function(row) { root.fold(modelData.id) }
-            onDragBegan: root.beginDrag(this)
-            onDragMoved: function(x, y) { root.moveDrag(x, y) }
-            onDragEnded: function(x, y) { root.endDrag(x, y) }
-          }
-        }
-
-        Text {
-          visible: root.barModules.length === 0
-          width: parent.width
-          text: "Nothing left on the bar to fold"
-          color: Util.alpha(root.contentColor, 0.5)
-          font.family: root.contentFont
-          font.pixelSize: Style.font.caption
-          wrapMode: Text.WordWrap
-        }
-      }
-
-      // Drop hint while dragging outside the strip.
-      Text {
-        visible: root.draggingFolderRow && root.dropOutside
-        width: parent.width
-        text: "Release to eject"
-        color: Color.urgent
-        font.family: root.contentFont
-        font.pixelSize: Style.font.caption
-        horizontalAlignment: Text.AlignHCenter
-        topPadding: Style.spacing.xs
-      }
-
-      Text {
-        visible: root.notice !== ""
-        width: parent.width
-        text: root.notice
-        color: Color.urgent
-        font.family: root.contentFont
-        font.pixelSize: Style.font.caption
-        wrapMode: Text.WordWrap
+  onMenuOpenChanged: {
+    if (root.menuOpen) {
+      root.menuCursor = 0
+      for (var i = 0; i < root.menuRows.length; i++) {
+        if (root.menuRows[i].enabled) { root.menuCursor = i; break }
       }
     }
   }

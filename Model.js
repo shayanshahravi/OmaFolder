@@ -120,35 +120,57 @@ function indexOfId(items, id) {
   return -1
 }
 
-// Where a drag that started on `from` and hovers row `to` should land. Dragging
-// down drops after the target row, dragging up drops before it, which is what
-// makes a single move feel predictable in a vertical list.
-function dropIndex(from, to) {
-  var source = Number(from)
-  var target = Number(to)
-  if (!isFinite(source) || !isFinite(target)) return 0
-  return target
+// "omarchy.audio" -> "audio", "io.github.ayan-de.android-mirror" ->
+// "android-mirror". Used where the full id would be noise.
+function shortName(id) {
+  var value = String(id || "")
+  if (value === "") return ""
+  var parts = value.split(".")
+  return parts.length > 1 ? parts[parts.length - 1] : value
 }
 
-// Decide what a finished drag should do. `inside` says whether the pointer was
-// still over the drawer when the button came up, and `target` is the row index
-// the pointer was nearest to.
+// A widget whose click cannot open a panel: say what to do instead of failing.
+function noPanelNotice(item) {
+  return title(item) + " has no panel of its own -- eject it to use it on the bar"
+}
+
+// ------------------------------------------------------------ update review
 //
-//   eject    a folder row dropped outside the drawer goes back onto the bar
-//   fold     a manage row dropped inside the drawer joins the folder
-//   reorder  a folder row moved onto another row takes its place
-//   same     dropped on itself, nothing to do
-//   none     a manage row dropped outside the drawer, or an unknown origin
-function resolveDrop(origin, from, target, inside, count) {
-  var source = String(origin || "")
-  if (source !== "folder" && source !== "bar") return { action: "none" }
-  if (!inside) return source === "folder" ? { action: "eject" } : { action: "none" }
-  if (source === "bar") return { action: "fold" }
-  var total = Number(count) || 0
-  var to = Number(target)
-  if (!isFinite(to) || to < 0 || to >= total) return { action: "none" }
-  if (to === Number(from)) return { action: "same" }
-  return { action: "reorder", index: to }
+// `review` is what `bin/omafolder-state update-check <id>` prints: the installed
+// version, the version the marketplace shows, and why the check ended the way
+// it did.
+
+function updateSummary(review) {
+  if (!review) return "No update information"
+  if (review.updateAvailable === true) {
+    return "Version " + String(review.latest || "") + " is published"
+  }
+  return String(review.note || "Up to date")
+}
+
+function updateTitle(review) {
+  if (!review) return ""
+  var name = String(review.name || review.id || "this plugin")
+  var latest = String(review.latest || "")
+  if (latest === "") return "A newer " + name + " is published"
+  return "Version " + latest + " of " + name + " is published"
+}
+
+function updateBody(review) {
+  if (!review) return ""
+  var installed = String(review.installed || "")
+  var where = review.listed === true ? "the Omarchy marketplace" : "its repository"
+  var text = installed !== ""
+    ? "You have " + installed + ", checked against " + where + "."
+    : "Checked against " + where + "."
+  return text + " Install it now?"
+}
+
+function updatedMessage(payload) {
+  if (!payload) return "Plugin updated"
+  var name = String(payload.name || payload.id || "Plugin")
+  var version = String(payload.version || "")
+  return version !== "" ? name + " updated to " + version : name + " updated to the latest commit"
 }
 
 function summaryLine(count) {

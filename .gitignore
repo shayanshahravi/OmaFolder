@@ -7,3 +7,8 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
+
+# Ignore zip backups and local WIP archives so they are not pushed to GitHub
+*.zip
+.o-local-wip/
+OmaFolder-archive/

@@ -102,4 +102,4 @@ then
 fi
 
 printf 'Done. Click the folder icon to open the drawer.\n'
-printf 'Fold a widget by pressing + in the drawer (drag also works).\n'
+printf 'Press + to fold a widget, and right-click a row for its actions.\n'

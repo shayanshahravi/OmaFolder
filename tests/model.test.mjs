@@ -8,38 +8,10 @@ import assert from "node:assert/strict"
 
 const source = readFileSync(new URL("../Model.js", import.meta.url), "utf8")
 const model = new Function(
-  source + "\nreturn { resolveDrop, moveItem, clampIndex, iconFor, hasIcon, initialFor, badgeText }"
+  source +
+    "\nreturn { moveItem, clampIndex, iconFor, hasIcon, initialFor, badgeText," +
+    " shortName, noPanelNotice, updateSummary, updateTitle, updateBody, updatedMessage }"
 )()
-
-test("a folder row dropped outside the drawer ejects", () => {
-  assert.deepEqual(model.resolveDrop("folder", 1, 2, false, 3), { action: "eject" })
-})
-
-test("a manage row dropped outside the drawer does nothing", () => {
-  assert.deepEqual(model.resolveDrop("bar", -1, -1, false, 3), { action: "none" })
-})
-
-test("a manage row dropped inside the drawer folds", () => {
-  assert.deepEqual(model.resolveDrop("bar", -1, 1, true, 3), { action: "fold" })
-})
-
-test("a folder row dropped on another row reorders", () => {
-  assert.deepEqual(model.resolveDrop("folder", 0, 2, true, 3), { action: "reorder", index: 2 })
-  assert.deepEqual(model.resolveDrop("folder", 2, 0, true, 3), { action: "reorder", index: 0 })
-})
-
-test("a folder row dropped on itself reports same", () => {
-  assert.deepEqual(model.resolveDrop("folder", 1, 1, true, 3), { action: "same" })
-})
-
-test("an out-of-range target is ignored", () => {
-  assert.deepEqual(model.resolveDrop("folder", 0, 5, true, 3), { action: "none" })
-  assert.deepEqual(model.resolveDrop("folder", 0, -1, true, 3), { action: "none" })
-})
-
-test("an unknown origin is ignored", () => {
-  assert.deepEqual(model.resolveDrop("nope", 0, 0, true, 3), { action: "none" })
-})
 
 test("moveItem reorders without dropping entries", () => {
   const items = [{ id: "a" }, { id: "b" }, { id: "c" }]
@@ -68,4 +40,60 @@ test("badges stay short", () => {
   assert.equal(model.badgeText(0), "")
   assert.equal(model.badgeText(3), "3")
   assert.equal(model.badgeText(12), "9+")
+})
+
+test("shortName drops the namespace", () => {
+  assert.equal(model.shortName("omarchy.audio"), "audio")
+  assert.equal(model.shortName("io.github.ayan-de.android-mirror"), "android-mirror")
+  assert.equal(model.shortName("nodots"), "nodots")
+  assert.equal(model.shortName(""), "")
+})
+
+test("a panelless widget is told to go back to the bar", () => {
+  const notice = model.noPanelNotice({ id: "omarchy.system-update", name: "System update" })
+  assert.match(notice, /System update/)
+  assert.match(notice, /eject/i)
+})
+
+test("an available update names both versions", () => {
+  const review = {
+    id: "marcho78.titlebars",
+    name: "Title Bars",
+    installed: "1.0.0",
+    latest: "1.2.0",
+    updateAvailable: true,
+    listed: true
+  }
+  assert.equal(model.updateTitle(review), "Version 1.2.0 of Title Bars is published")
+  assert.match(model.updateBody(review), /1\.0\.0/)
+  assert.match(model.updateBody(review), /Omarchy marketplace/)
+  assert.match(model.updateBody(review), /Install it now\?/)
+  assert.equal(model.updateSummary(review), "Version 1.2.0 is published")
+})
+
+test("an up-to-date check explains itself", () => {
+  const review = {
+    id: "marcho78.titlebars",
+    name: "Title Bars",
+    installed: "1.0.0",
+    latest: "1.0.0",
+    updateAvailable: false,
+    listed: true,
+    note: "Up to date"
+  }
+  assert.equal(model.updateSummary(review), "Up to date")
+  assert.equal(model.updateSummary({ note: "Ships with Omarchy; it updates with the system" }),
+    "Ships with Omarchy; it updates with the system")
+  assert.equal(model.updateSummary(null), "No update information")
+})
+
+test("an update result turns into one sentence", () => {
+  assert.equal(
+    model.updatedMessage({ id: "x.y", name: "Title Bars", version: "1.2.0" }),
+    "Title Bars updated to 1.2.0"
+  )
+  assert.equal(
+    model.updatedMessage({ id: "x.y", name: "Title Bars", version: "" }),
+    "Title Bars updated to the latest commit"
+  )
 })

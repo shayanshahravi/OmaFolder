@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 # Runs OmaFolder's automated tests.
 #
-#   tests/run.sh            unit tests only
-#   tests/run.sh --live     also drives a real drag inside the running shell
+#   tests/run.sh
 #
-# The drag gesture itself is verified against the live shell through the
-# plugin's `drag` IPC method (see tests/live-drag.sh). Qt's qmltestrunner cannot
-# deliver synthetic pointer events on this Qt build, so a standalone gesture
-# suite would report false failures.
+# Qt's qmltestrunner cannot deliver synthetic pointer events on this Qt build, so
+# the QML itself is checked for syntax only; every decision it makes lives in
+# Model.js or bin/omafolder-state, which are covered here.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -16,20 +14,14 @@ echo "== JS: model logic"
 node --test "$ROOT/tests/model.test.mjs"
 
 echo "== QML: syntax"
-QML="$(command -v qmlformat >/dev/null 2>&1 && echo ok || true)"
 for file in BarWidget.qml Drawer.qml DrawerItem.qml; do
-  /usr/lib/qt6/bin/qmllint "$ROOT/$file" 2>&1 | grep -qiE "expected token|syntax error" && {
+  if /usr/lib/qt6/bin/qmllint "$ROOT/$file" 2>&1 | grep -qiE "expected token|syntax error"; then
     echo "syntax error in $file" >&2
     exit 1
-  }
+  fi
   echo "  $file ok"
 done
 
 echo "== Python: state engine"
 python3 -m py_compile "$ROOT/bin/omafolder-state"
-echo "  omafolder-state ok"
-
-if [ "${1:-}" = "--live" ]; then
-  echo "== Live: drag inside the running shell"
-  "$ROOT/tests/live-drag.sh"
-fi
+python3 "$ROOT/tests/engine.test.py"
