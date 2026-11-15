@@ -5,6 +5,14 @@ All notable changes to OmaFolder are documented here. This project follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Folded icons are centred in the collapsed 32 px strip, and a list row's label
+  starts after the icon column instead of running over the icon.
+- Opening a folded widget's panel no longer throws the widget out of the folder:
+  the row is lent to the bar only while its panel is up (`expose`/`conceal`) and
+  comes back to the folder as soon as the panel closes.
+
 ## [1.1.0] - 2026-11-15
 
 ### Fixed

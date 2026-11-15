@@ -141,6 +141,9 @@ Panel {
   property int menuCursor: 0
   // Widget the pending summon call is for, read when it answers.
   property string summoningId: ""
+  // Widget currently sitting on the bar only because its panel is open.
+  property string watchingId: ""
+  property int closedReads: 0
 
   readonly property int itemCount: items.length
 
@@ -234,20 +237,48 @@ Panel {
     root.runLayoutEngine(["eject", String(entry.id)])
   }
 
+  // Panel, overlay and menu plugins are loaded by the shell registry, so they
+  // can be summoned while folded. A plain bar widget can only open its panel
+  // through a live bar instance, and a folded one has none.
+  readonly property var loaderKinds: ["panel", "overlay", "menu"]
+
+  function needsExpose(entry) {
+    var kinds = (entry && entry.kinds) || []
+    for (var i = 0; i < kinds.length; i++) {
+      if (root.loaderKinds.indexOf(kinds[i]) !== -1) return false
+    }
+    return kinds.indexOf("bar-widget") !== -1
+  }
+
   function summon(index) {
     var entry = root.items[index]
     if (!entry) return
     root.closeMenu()
-    // A folded widget is not in the bar layout, so the shell never built its
-    // IpcHandler and `summon` answers "unknown". Put it back on the bar first
-    // - that write reloads the shell and registers the handler - then summon
-    // the live instance. The widget stays on the bar afterwards.
     root.summoningId = String(entry.id || "")
     root.close()
+    if (root.needsExpose(entry)) {
+      // Lend it to the bar for as long as the panel is up, then take it back.
+      Qt.callLater(function() {
+        exposeProcess.command = [root.engine, "expose", root.summoningId]
+        exposeProcess.running = true
+      })
+      return
+    }
     Qt.callLater(function() {
-      ejectForSummonProcess.command = [root.engine, "eject", root.summoningId]
-      ejectForSummonProcess.running = true
+      summonProcess.command = ["omarchy-shell", "shell", "summon", root.summoningId, "{}"]
+      summonProcess.running = true
     })
+  }
+
+  // The row is only on the bar while its panel is up: as soon as the panel
+  // closes it goes back into the folder, in the same position.
+  function conceal(id) {
+    if (String(id) === "") return
+    root.watchingId = ""
+    root.closedReads = 0
+    watchTimer.stop()
+    concealProcess.command = [root.engine, "conceal", String(id)]
+    concealProcess.running = true
   }
 
   function moveItem(from, to) {
@@ -458,7 +489,14 @@ Panel {
     onExited: function(code) {
       var text = String(summonOutput.text || "").trim()
       var id = root.summoningId
-      if (code === 0 && text === "ok") return
+      if (code === 0 && text === "ok") {
+        root.watchingId = id
+        root.closedReads = 0
+        watchTimer.restart()
+        return
+      }
+      // It did not open: put the row straight back in the folder.
+      if (id !== "") root.conceal(id)
       if (text === "unknown" && id !== "") {
         var next = {}
         for (var key in root.panellessIds) next[key] = root.panellessIds[key]
@@ -473,25 +511,53 @@ Panel {
     }
   }
 
-  // Eject-then-summon: the eject puts the widget back in the bar layout, the
-  // shell reload registers its IpcHandler, and the summon lands on a real
-  // instance instead of answering "unknown".
+  // Expose-then-summon: a folded widget has no live bar instance, so the shell
+  // cannot summon its panel and answers "unknown". Putting it back in the bar
+  // layout gives it an instance and registers its handler; the summon then
+  // lands on that instance, and the watcher puts the row back in the folder as
+  // soon as the panel closes.
   Process {
-    id: ejectForSummonProcess
-    stdout: StdioCollector { id: ejectForSummonOutput; waitForEnd: true }
+    id: exposeProcess
+    stdout: StdioCollector { id: exposeOutput; waitForEnd: true }
     onExited: function(code) {
       var payload = null
-      try { payload = JSON.parse(String(ejectForSummonOutput.text || "")) } catch (error) { payload = null }
+      try { payload = JSON.parse(String(exposeOutput.text || "")) } catch (error) { payload = null }
       if (code !== 0 || !payload || payload.ok === false) {
         root.summoningId = ""
         notifyProcess.command = [
           "notify-send", "-a", "OmaFolder",
-          "OmaFolder", payload && payload.error ? String(payload.error) : "That widget could not go back to the bar"
+          "OmaFolder", payload && payload.error ? String(payload.error) : "That widget could not be opened"
         ]
         notifyProcess.running = true
         return
       }
       summonTimer.restart()
+    }
+  }
+
+  Process {
+    id: concealProcess
+    stdout: StdioCollector { id: concealOutput; waitForEnd: true }
+    onExited: function(code) {
+      root.reload()
+      if (root.listOpen) root.reloadModules()
+    }
+  }
+
+  // The bar knows whether a widget's panel is up; two closed reads in a row so
+  // the moment between summon and the panel appearing does not fold it away.
+  Timer {
+    id: watchTimer
+    interval: 600
+    repeat: true
+    onTriggered: {
+      var id = root.watchingId
+      if (id === "") { watchTimer.stop(); return }
+      var isOpen = root.bar && typeof root.bar.isBarWidgetOpen === "function"
+        && root.bar.isBarWidgetOpen(id) === true
+      if (isOpen) { root.closedReads = 0; return }
+      root.closedReads += 1
+      if (root.closedReads >= 2) root.conceal(id)
     }
   }
 

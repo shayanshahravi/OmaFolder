@@ -60,26 +60,38 @@ Item {
     Behavior on scale { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
   }
 
-  Text {
-    id: icon
+  // The glyph sits in a square slot the size of the row and is centred inside
+  // it, so a narrow icon or one with side bearing still looks centred in the
+  // collapsed strip and starts the same column as the list below.
+  Item {
+    id: iconSlot
+    width: root.height
+    height: root.height
     anchors.verticalCenter: parent.verticalCenter
     anchors.horizontalCenter: root.showLabel ? undefined : parent.horizontalCenter
     anchors.left: root.showLabel ? parent.left : undefined
     anchors.leftMargin: root.showLabel ? Style.spacing.xs : 0
-    text: root.hasGlyph ? root.glyph : Model.initialFor(root.item)
-    color: root.rowColor
-    font.family: Style.font.family
-    font.pixelSize: root.hasGlyph ? Style.bar.iconFont : Style.font.bodySmall
-    font.bold: !root.hasGlyph
-    opacity: root.active ? 1 : 0.4
 
-    Behavior on opacity { NumberAnimation { duration: 140 } }
+    Text {
+      id: icon
+      anchors.fill: parent
+      horizontalAlignment: Text.AlignHCenter
+      verticalAlignment: Text.AlignVCenter
+      text: root.hasGlyph ? root.glyph : Model.initialFor(root.item)
+      color: root.rowColor
+      font.family: Style.font.family
+      font.pixelSize: root.hasGlyph ? Style.bar.iconFont : Style.font.bodySmall
+      font.bold: !root.hasGlyph
+      opacity: root.active ? 1 : 0.4
+
+      Behavior on opacity { NumberAnimation { duration: 140 } }
+    }
   }
 
   Text {
     visible: root.showLabel
     anchors.verticalCenter: parent.verticalCenter
-    anchors.left: icon.right
+    anchors.left: iconSlot.right
     anchors.leftMargin: Style.spacing.xs
     anchors.right: parent.right
     anchors.rightMargin: Style.spacing.xs

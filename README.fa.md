@@ -90,6 +90,8 @@ bin/omafolder-state toggle <id>
 bin/omafolder-state reorder <id> <index>
 bin/omafolder-state update-check <id>
 bin/omafolder-state update <id>
+bin/omafolder-state expose <id>     # lend a folded widget to the bar
+bin/omafolder-state conceal <id>    # take it back into the folder
 bin/omafolder-state eject-all      # استفاده‌شده در uninstall.sh
 ```
 

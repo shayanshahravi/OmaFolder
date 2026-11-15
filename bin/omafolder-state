@@ -132,14 +132,17 @@ def load_state():
         plugin_id = str(entry.get("id") or "").strip()
         if plugin_id == "" or plugin_id == PLUGIN_ID:
             continue
-        cleaned.append(
-            {
-                "id": plugin_id,
-                "active": bool(entry.get("active", True)),
-                "section": entry.get("section") if entry.get("section") in SECTIONS else "right",
-                "index": int(entry.get("index") or 0),
-            }
-        )
+        item = {
+            "id": plugin_id,
+            "active": bool(entry.get("active", True)),
+            "section": entry.get("section") if entry.get("section") in SECTIONS else "right",
+            "index": int(entry.get("index") or 0),
+        }
+        # A row lent to the bar while its panel is open keeps that flag across
+        # reads, otherwise the conceal that follows sees a plain folded entry.
+        if entry.get("exposed"):
+            item["exposed"] = True
+        cleaned.append(item)
     state["items"] = cleaned
     state.setdefault("version", 1)
     state["pluginId"] = PLUGIN_ID
@@ -494,6 +497,76 @@ def command_eject(args):
             "reloaded": reloaded,
         }
     )
+
+
+def command_expose(args):
+    """Put a folded widget back on the bar without unfolding it.
+
+    A bar widget only has a live instance while it is in the bar layout, and
+    that instance is the one the shell can summon a panel from. The drawer
+    exposes a row for as long as its panel is open and conceals it again, so the
+    folder keeps its contents instead of spilling the widget onto the bar.
+    """
+    plugin_id = required_id(args)
+    state = load_state()
+    item = None
+    for entry in state["items"]:
+        if entry["id"] == plugin_id:
+            item = entry
+            break
+    if item is None:
+        return die("%s is not folded" % plugin_id)
+    if item.get("exposed"):
+        return out({"exposed": True, "id": plugin_id, "already": True})
+
+    shell = load_shell()
+    layout = layout_of(shell)
+    remove_entry(layout, plugin_id)
+    section, position = insert_entry(layout, plugin_id, item.get("section"), item.get("index"))
+
+    item["exposed"] = True
+    save_state(state)
+    backup(SHELL_PATH)
+    atomic_write(SHELL_PATH, shell)
+    reloaded = reload_shell()
+    return out(
+        {
+            "exposed": True,
+            "id": plugin_id,
+            "section": section,
+            "index": position,
+            "reloaded": reloaded,
+        }
+    )
+
+
+def command_conceal(args):
+    """Take a temporarily exposed widget back into the folder."""
+    plugin_id = required_id(args)
+    state = load_state()
+    item = None
+    for entry in state["items"]:
+        if entry["id"] == plugin_id:
+            item = entry
+            break
+    if item is None:
+        return die("%s is not folded" % plugin_id)
+    if not item.get("exposed"):
+        return out({"exposed": False, "id": plugin_id, "already": True})
+
+    shell = load_shell()
+    layout = layout_of(shell)
+    removed = remove_entry(layout, plugin_id)
+    if removed is not None:
+        item["section"] = removed["section"]
+        item["index"] = removed["index"]
+    item.pop("exposed", None)
+
+    save_state(state)
+    backup(SHELL_PATH)
+    atomic_write(SHELL_PATH, shell)
+    reloaded = reload_shell()
+    return out({"exposed": False, "id": plugin_id, "reloaded": reloaded})
 
 
 def command_toggle(args):
@@ -874,6 +947,8 @@ COMMANDS = {
     "bar-modules": command_bar_modules,
     "fold": command_fold,
     "eject": command_eject,
+    "expose": command_expose,
+    "conceal": command_conceal,
     "eject-all": command_eject_all,
     "toggle": command_toggle,
     "active": command_active,
